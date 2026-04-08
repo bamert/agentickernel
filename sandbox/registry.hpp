@@ -3,22 +3,22 @@
 #include <string>
 #include <cstdint>
 
+// 1. Wrap every agent file in its own namespace to prevent ODR errors
+
 namespace baseline {
     #include "baseline.hpp"
 }
-namespace unroll4 {
-    #include "unroll4.hpp"
+
+namespace optimized_v2 {
+    #include "optimized_v2.hpp"
 }
 
+namespace optimized_v3 {
+    #include "optimized_v3.hpp"
+}
 
-namespace unroll8 {
-    #include "unroll8.hpp"
-}
-namespace best {
-    #include "best.hpp"
-}
-namespace best_scalar_unrolled {
-    #include "best_scalar_unrolled.hpp"
+namespace optimized_v1 {
+    #include "optimized_v1.hpp"
 }
 
 
@@ -32,13 +32,13 @@ struct KernelRegistry {
 inline std::vector<KernelRegistry> all_match_kernels() {
     return {
     
-        {"unroll4", unroll4::dot_product},
-    
         {"baseline", baseline::dot_product},
     
-        {"unroll8", unroll8::dot_product},
-        {"best", best::dot_product},
-        {"best_scalar_unrolled", best_scalar_unrolled::dot_product}
+        {"optimized_v2", optimized_v2::dot_product},
+    
+        {"optimized_v3", optimized_v3::dot_product},
+    
+        {"optimized_v1", optimized_v1::dot_product}
     
     };
 }

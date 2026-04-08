@@ -5,10 +5,42 @@ import re
 import json
 import inspect
 from jinja2 import Environment, FileSystemLoader
+import subprocess
 
 MAX_ITERATIONS = 50
 MAX_RETRIES = 5
 PERF_GOAL_MS = 1.5
+
+def run_make_in_sandbox() -> str:
+    # Safely resolve cwd/sandbox relative to this Python file
+    sandbox_path = Path(__file__).parent / "sandbox"
+    
+    try:
+        # stderr=subprocess.STDOUT merges errors directly into standard output.
+        # text=True automatically decodes the byte stream to a string.
+        process = subprocess.run(
+            ["make"],
+            cwd=sandbox_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10 # Crucial: Prevents a weird build state from hanging the agent forever
+        )
+        
+        # We return everything. The LLM gets the raw terminal experience.
+        if process.returncode == 0:
+            return f"Make completed successfully:\n\n{process.stdout}"
+        else:
+            return f"Make failed (Exit code {process.returncode}):\n\n{process.stdout}"
+            
+    except subprocess.TimeoutExpired as e:
+        # If make hangs, we catch it and feed the partial output back to the LLM
+        partial_out = e.stdout.decode('utf-8', errors='replace') if e.stdout else "No output."
+        return f"Build TIMED OUT after 10 seconds. Partial output:\n\n{partial_out}"
+    except FileNotFoundError:
+        return "System error: 'make' command not found. Is build-essential installed?"
+    except Exception as e:
+        return f"System error executing make: {str(e)}"
 def build_registry(method_names: list[str]):
     env = Environment(loader=FileSystemLoader("."))
     template = env.get_template("registry.hpp.template")
@@ -73,11 +105,12 @@ class KernelTools:
         method_names = [f.stem for f in self.sandbox_dir.iterdir() if f.is_file() and str(f).endswith(".hpp") and f.stem != "registry"]
         print("Current kernel files in sandbox:", method_names)
         build_registry(method_names)
+        output = run_make_in_sandbox()
         
         return {
             "success": True, 
             "filepath": name,
-            "output": "This is not implemented yet, but please keep trying"
+            "output": output
         }
     def read_file(self, name: str) -> dict:
         """Reads a file, strictly enforcing a flat filename (extensions allowed, subfolders blocked)."""
@@ -177,7 +210,7 @@ def build_system_context(locked_files: set, summaries: list, graveyard: list) ->
         prompt += "GRAVEYARD (Failed approaches, do not repeat):\n" + "\n".join(f"- {g}" for g in graveyard) + "\n"
         
     prompt += "\nRules: Read files to understand state. Use `write_and_evaluate_kernel` to propose, compile, and test optimizations in one step. Attempts to overwrite locked files will be blocked."
-    prompt += "\n Read `baseline.cpp` for the desired function signature"
+    prompt += "\n Read `baseline.hpp` for the desired function signature"
     return prompt
 
 def run_autonomous_loop(spec_prompt: str, toolkit: KernelTools, model: str, base_url: str, api_key: str = ""):
@@ -292,4 +325,4 @@ if __name__ == "__main__":
     API_KEY = os.getenv("OPENROUTER")
     
     toolkit = KernelTools()
-    run_autonomous_loop("Optimize the kernel in baseline.cpp by writing more efficient versions of it with the same function signature. Create new files for each version" , toolkit, MODEL, BASE_URL, API_KEY)
+    run_autonomous_loop("Optimize the kernel in baseline.hpp by writing more efficient versions of it with the same function signature. Create new files for each version" , toolkit, MODEL, BASE_URL, API_KEY)
