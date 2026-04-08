@@ -4,10 +4,18 @@ import os
 import re
 import json
 import inspect
+from jinja2 import Environment, FileSystemLoader
 
 MAX_ITERATIONS = 50
 MAX_RETRIES = 5
 PERF_GOAL_MS = 1.5
+def build_registry(method_names: list[str]):
+    env = Environment(loader=FileSystemLoader("."))
+    template = env.get_template("registry.hpp.template")
+    rendered_cpp = template.render(methods=method_names)
+    output_name = Path(__file__).resolve().parent / "sandbox" / "registry.hpp"
+    with open(output_name, "w") as f:
+        f.write(rendered_cpp)
 class KernelTools:
     """Base class that auto-discovers methods and generates OpenAI tool schemas."""
     
@@ -45,21 +53,23 @@ class KernelTools:
     def write_and_evaluate_kernel(self, name: str, content: str) -> dict:
         """Writes kernel code to a file and triggers the evaluation pipeline."""
         
-        # 1. Strict Sandbox Validation
         # Enforces a flat filename. Allows an optional extension but completely blocks slashes and directory traversal.
         if not re.match(r"^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9]+)?$", name):
             return {"error": "Invalid name: must be a flat filename without subfolders (e.g., 'kernel' or 'kernel.cpp')."}
             
         file_path = self.sandbox_dir / name
         
-        # 2. Write the file
         try:
             file_path.write_text(content, encoding="utf-8")
         except Exception as e:
             return {"error": f"Failed to write file: {str(e)}"}
             
-        # 3. Evaluation Pipeline Placeholder
-        # Compile -> Test -> Benchmark (To be implemented)
+        # Compile -> Test -> Benchmark 
+        # (To be implemented)
+        # Write method names
+
+        files = [f.name for f in self.sandbox_dir.iterdir() if f.is_file()]
+        build_registry(files)
         
         return {
             "success": True, 

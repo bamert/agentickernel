@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __kernelperf_registry
+#define __kernelperf_registry
 #include <vector>
 #include <cstdint>
 #include <string>
@@ -17,3 +18,4 @@ std::vector<Kernel> all_match_kernels() {
         {"baseline", &baseline},
 };
 }
+#endif

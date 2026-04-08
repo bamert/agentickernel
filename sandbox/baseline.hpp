@@ -1,5 +1,4 @@
-#ifndef __kernelperf_baseline
-#define __kernelperf_baseline
+#pragma once
 #include <iostream>
 #include <vector>
 #include <cstdint>
@@ -16,5 +15,3 @@ float baseline(const float* vec1, const int8_t* vec2, size_t n) {
     return sum;
 }
 
-
-#endif 
