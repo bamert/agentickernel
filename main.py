@@ -13,14 +13,13 @@ def build_registry(method_names: list[str]):
     env = Environment(loader=FileSystemLoader("."))
     template = env.get_template("registry.hpp.template")
     rendered_cpp = template.render(methods=method_names)
-    output_name = Path(__file__).resolve().parent / "sandbox" / "registry.hpp"
-    with open(output_name, "w") as f:
-        f.write(rendered_cpp)
+    output_path = Path(__file__).resolve().parent / "sandbox" / "registry.hpp"
+    Path(output_path).write_text(rendered_cpp, encoding="utf-8")
 class KernelTools:
     """Base class that auto-discovers methods and generates OpenAI tool schemas."""
     
     def __init__(self):
-        self.sandbox_dir = Path.cwd().resolve() / "sandbox"
+        self.sandbox_dir = Path(__file__).resolve().parent / "sandbox"
     def get_tool_schemas(self) -> list[dict]:
         """Generates OpenAI-compatible function schemas from instance methods."""
         tools = []
@@ -53,6 +52,8 @@ class KernelTools:
     def write_and_evaluate_kernel(self, name: str, content: str) -> dict:
         """Writes kernel code to a file and triggers the evaluation pipeline."""
         
+        if name.lower().endswith(".cpp"):
+            return {"error": "Direct .cpp file writing is blocked. Please write implementation into the hpp file like in baseline.hpp"}
         # Enforces a flat filename. Allows an optional extension but completely blocks slashes and directory traversal.
         if not re.match(r"^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9]+)?$", name):
             return {"error": "Invalid name: must be a flat filename without subfolders (e.g., 'kernel' or 'kernel.cpp')."}
@@ -68,8 +69,10 @@ class KernelTools:
         # (To be implemented)
         # Write method names
 
-        files = [f.name for f in self.sandbox_dir.iterdir() if f.is_file()]
-        build_registry(files)
+        print("Rebuilding registry with current sandbox files...")
+        method_names = [f.stem for f in self.sandbox_dir.iterdir() if f.is_file() and str(f).endswith(".hpp") and f.stem != "registry"]
+        print("Current kernel files in sandbox:", method_names)
+        build_registry(method_names)
         
         return {
             "success": True, 

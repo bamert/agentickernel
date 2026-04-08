@@ -1,21 +1,26 @@
-#ifndef __kernelperf_registry
-#define __kernelperf_registry
+#pragma once
 #include <vector>
-#include <cstdint>
 #include <string>
-#include "baseline.hpp"
-using KernelSignature = float (*)(const float* vec1, const int8_t* vec2, size_t n);
+#include <cstdint>
 
-struct Kernel {
+// 1. Wrap every agent file in its own namespace to prevent ODR errors
+{% for method in methods %}
+namespace {{ method }} {
+    #include "{{ method }}.hpp"
+}
+{% endfor %}
+
+// 2. Define the struct our main.cpp loop expects
+struct KernelRegistry {
     std::string name;
-    KernelSignature fn;
+    float (*fn)(const float*, const int8_t*, size_t);
 };
-inline void PrintTo(const Kernel& k, std::ostream* os) {
-    *os << k.name;
-}
-std::vector<Kernel> all_match_kernels() {
+
+// 3. Populate and return the registry
+inline std::vector<KernelRegistry> all_match_kernels() {
     return {
-        {"baseline", &baseline},
-};
+    {% for method in methods %}
+        {"{{ method }}", {{ method }}::dot_product}{% if not loop.last %},{% endif %}
+    {% endfor %}
+    };
 }
-#endif
