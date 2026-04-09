@@ -12,8 +12,8 @@ namespace baseline {
     #include "baseline.hpp"
 }
 
-namespace attempt_2 {
-    #include "attempt_2.hpp"
+namespace optimized_v5_neon {
+    #include "optimized_v5_neon.hpp"
 }
 
 
@@ -32,7 +32,7 @@ inline std::vector<KernelRegistry> all_match_kernels() {
         {"baseline", baseline::matmul},
     
         // Assumes every file defines a function literally named `matmul`
-        {"attempt_2", attempt_2::matmul}
+        {"optimized_v5_neon", optimized_v5_neon::matmul}
     
     };
 }

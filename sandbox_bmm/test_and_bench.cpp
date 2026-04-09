@@ -100,13 +100,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!failed.empty()) {
+        std::cerr << "Test failed. Skipping benchmarks " << std::endl;
+        exit(1);
+    }
     // 2. Register Benchmarks Once
     for (const auto& k : all_match_kernels()) {
-        // Skip failures
-        if (std::find(failed.begin(), failed.end(), k.name) != failed.end()) {
-            continue;
-        }
-
         benchmark::RegisterBenchmark(k.name.c_str(), [k, &A, &B, &C_target, M, K](benchmark::State& state) {
             for (auto _ : state) {
                 k.fn(A.data(), B.data(), C_target.data(), M, K);

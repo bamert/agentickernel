@@ -1,4 +1,5 @@
 import os
+import time
 import re
 import json
 import inspect
@@ -28,8 +29,23 @@ class KernelTools:
         self.build_dir = build_dir
         self.sandbox_dir.mkdir(parents=True, exist_ok=True)
         self.jinja_env = Environment(loader=FileSystemLoader(str(self.sandbox_dir)))
+        self.perf: dict[str,str] = {} # method to outcome mapping (if multiple attempts were made, only latest one)
+        self.log = [] # chronological log and perf  (for all attempts)
         print(f"[*] Sandbox loaded at: {self.sandbox_dir}")
 
+
+    def log_perf(self, target_name:str, message: str, baseline_ms:float=-1., target_ms:float=-1.):
+        iteration = len(self.log)
+        if len(self.log) == 0:
+            self.log.append(f"{iteration}, baseline,{message},{baseline_ms}, 1.00")
+        self.log.append(f"{iteration+1}, {target_name},{message},{target_ms}, {(target_ms / baseline_ms)}")
+        self.perf["baseline"] = f"{baseline_ms}ms"
+        self.perf[target_name] = f"{target_ms}ms"
+    def get_perf_log_for_llm(self) -> str:
+        status = ""
+        for k,v in self.perf.items():
+            status += f"{k}: {v}. \n"
+        return status
     def get_tool_schemas(self) -> list[dict]:
         tools = []
         type_map = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}
@@ -65,13 +81,19 @@ class KernelTools:
         compile_ok, compile_out = run_cmd(["make"], self.build_dir)
         if not compile_ok:
             print("  !! Compilation Failed.")
-            return {"success": False, "output": f"COMPILATION FAILED:\n\n{compile_out[:2000]}"}
+            self.log_perf(target_name, "compilation failed")
+            lines = compile_out.splitlines()
+            important_lines = [line for line in lines if "error:" in line or "note:" in line]
+            filtered_out = "\n".join(important_lines)
+            if not filtered_out.strip():
+                filtered_out = compile_out[:1000] # Fallback for linker errors
+            return {"success": False, "output": f"COMPILATION FAILED:\n\n{filtered_out}"}
 
-        print("  -> Benchmarking...")
         # Add the CSV flag right here!
         bench_ok, bench_out = run_cmd(["./test_and_bench", "--benchmark_format=csv"], self.build_dir)
-        print(f"  -> Benchmark complete. (Exit code 0: {bench_ok})")
-
+        print(f"  -> Benchmark {"complete" if bench_ok else "failed"}")
+        if not bench_ok:
+            self.log_perf(target_name, "tests failed")
         # --- EXTRACT RUNTIMES FROM CSV ---
         if compile_ok and bench_ok:
             # Look for the quoted names in the CSV output
@@ -81,6 +103,8 @@ class KernelTools:
             if base_match and target_match:
                 base_ns = float(base_match.group(1))
                 target_ns = float(target_match.group(1))
+                base_ms = base_ns / 1e6
+                target_ms = target_ns / 1e6
                 
                 is_faster = target_ns < base_ns
                 ratio = (base_ns / target_ns) if is_faster else (target_ns / base_ns)
@@ -88,8 +112,11 @@ class KernelTools:
                 comp = "FASTER" if is_faster else "SLOWER"
                 
                 # Append a bright, unmissable summary for the LLM
-                summary = f"\n\n[SYSTEM NOTE: {status}! Your code ran in {target_ns/1e6:.2f}ms. It is {ratio:.2f}x {comp} than the baseline ({base_ns/1e6:.2f}ms).]"
+                self.log_perf(target_name, status, base_ms, target_ms)
+                #summary = f"\n\n[SYSTEM NOTE: {status}! Your code ran in {target_ms:.2f}ms. It is {ratio:.2f}x {comp} than the baseline ({base_ms:.2f}ms).]"
+                summary = self.get_perf_log_for_llm()
                 print(summary)
+                #print(self.perf)
                 bench_out += summary
 
         return {"success": bench_ok, "output": bench_out}
@@ -107,11 +134,20 @@ class KernelTools:
 def call_llm(conv, tools, model, url, key):
     headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {key}"} if key else {})}
     payload = {"model": model, "messages": conv, "tools": tools}
-    r = requests.post(url, json=payload, headers=headers)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]
+    for _ in range(3):
+        r = requests.post(url, json=payload, headers=headers)
+        r.raise_for_status()
+        resp = r.json()
+        if "choices" not in resp or len(resp["choices"]) == 0:
+            time.sleep(5)
+            continue
+        else:
+            break
+    return resp["choices"][0]["message"], resp.get("usage", {})
 
 def run_autonomous_loop(spec_prompt, toolkit, model, url, key):
+    total_in_tokens = 0
+    total_out_tokens = 0
     sys_prompt = (
         "You are a C++ Optimization Agent. Do NOT use #includes in your generated files. "
         "Every file you evaluate is tested 1v1 against the baseline. If an approach fails to compile or is too slow, "
@@ -126,14 +162,19 @@ def run_autonomous_loop(spec_prompt, toolkit, model, url, key):
 
     for iteration in range(MAX_ITERATIONS):
         print(f"\n--- Iteration {iteration + 1}/{MAX_ITERATIONS} ---")
-        msg = call_llm(conversation, toolkit.get_tool_schemas(), model, url, key)
+        msg, usage = call_llm(conversation, toolkit.get_tool_schemas(), model, url, key)
+        if usage:
+            total_in_tokens += usage.get("prompt_tokens", 0)
+            total_out_tokens += usage.get("completion_tokens", 0)
+            print(f"  [Tokens] In: {total_in_tokens} | Out: {total_out_tokens}")
+
         conversation.append(msg)
         
         if msg.get("content"):
             print(f"Agent:\n{msg['content']}\n")
             
         if not msg.get("tool_calls"):
-            conversation.append({"role": "user", "content": "Please continue working by calling a tool."})
+            conversation.append({"role": "user", "content": "Please continue working by calling a tool. Pick the optimization path that you think is most likely to succeed based on the feedback you have received so far."})
             continue
             
         for call in msg["tool_calls"]:
@@ -151,11 +192,50 @@ def run_autonomous_loop(spec_prompt, toolkit, model, url, key):
                 "name": t_name, 
                 "content": json.dumps(res)
             })
+            """
+            # We are not doing this for now.
+            if t_name == "write_and_evaluate_kernel" and res.get("success"):
+                print("Flushing context to save tokens...")
+                
+                # 1. Reset conversation to the original system and user prompts
+                conversation = [
+                    {"role": "system", "content": sys_prompt}, 
+                    {"role": "user", "content": spec_prompt}
+                ]
+                
+                # 2. Build the "catch-up" message using your new logging system
+                perf_state = toolkit.get_perf_log_for_llm()
+                target = t_args.get('name', 'your last attempt')
+                
+                catch_up_msg = (
+                    f"System Note: The context window was flushed to save memory.\n\n"
+                    f"Your last kernel (`{target}`) compiled and benched successfully. "
+                    f"Here is the leaderboard of all attempts so far:\n{perf_state}\n\n"
+                    f"If you need to see the code for any previous attempt, use the `read_file` tool. "
+                    f"Please continue optimizing."
+                )
+                
+                # 3. Append the catch-up message and skip the raw tool append
+                conversation.append({"role": "user", "content": catch_up_msg})
+                continue
+            """
 
 if __name__ == "__main__":
     url = "https://openrouter.ai/api/v1/chat/completions"
     model = "google/gemini-3-flash-preview"
-    #url = "http://gx10:11434/v1/chat/completions" 
+    #model = "google/gemini-3.1-pro-preview"
+    #model = "google/gemma-4-31b-it"
+    #model = "google/gemini-2.5-pro"
+    #model = "z-ai/glm-5.1"
+    #model = "openai/gpt-5-nano"
+    #model ="google/gemini-2.5-flash"
+    #model = "openai/gpt-5.4-mini"
+    url = "http://gx10:11434/v1/chat/completions" 
+    model = "gpt-oss:120b"
+    #model = "nemotron-3-super:120b"
+    #model = "qwen3-coder-next"
+    #model = "gemma4:31b"
+    model = "gemma4:e2b"
     #model = "gemma4:e4b"
     key = os.getenv("OPENROUTER")
     script_dir = Path(__file__).resolve().parent
@@ -163,6 +243,6 @@ if __name__ == "__main__":
     build_dir = script_dir / "build"
     kernel_tools = KernelTools(sandbox_dir, build_dir)
     run_autonomous_loop(
-        "Optimize baseline.hpp by writing more efficient versions. Create a new .hpp file for each attempt with the same structure as baseline.hpp for each attempt. Use the same function signature for dot product. ", 
+        "Optimize baseline.hpp by writing more efficient versions. Create a new .hpp file for each attempt with the same structure as baseline.hpp for each attempt. Use the same function signature for matmul. Start without intrinsics. If you later want to use intrinsics, use NEON, but stay on one core (no openmp or similar). neon intrinsics are already included in the harness. you don't need to add it.", 
         kernel_tools , model, url, key
     )
