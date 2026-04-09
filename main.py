@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 import time
 import re
 import json
@@ -8,7 +9,6 @@ import requests
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
-MAX_ITERATIONS = 50
 
 def run_cmd(cmd: list[str], cwd: Path) -> tuple[bool, str]:
     try:
@@ -38,7 +38,7 @@ class KernelTools:
         iteration = len(self.log)
         if len(self.log) == 0:
             self.log.append(f"{iteration}, baseline,{message},{baseline_ms}, 1.00")
-        self.log.append(f"{iteration+1}, {target_name},{message},{target_ms}, {(target_ms / baseline_ms)}")
+        self.log.append(f"{iteration+1}, {target_name},{message},{target_ms}, {(baseline_ms/target_ms)}")
         self.perf["baseline"] = f"{baseline_ms}ms"
         self.perf[target_name] = f"{target_ms}ms"
     def get_perf_log_for_llm(self) -> str:
@@ -46,6 +46,18 @@ class KernelTools:
         for k,v in self.perf.items():
             status += f"{k}: {v}. \n"
         return status
+    def export_csv(self, model: str):
+        """Exports the chronological log to a CSV file using pathlib."""
+        model_descriptor = model.replace("/","_")
+        output_path = self.script_dir / f"benchmark_{model_descriptor}_results.csv"
+        
+        # Build the entire CSV content as a single string
+        content = "model,iteration,target,message,target_ms,speedup\n"
+        content += "".join(f'"{model_descriptor}",{entry}\n' for entry in self.log)
+        
+        # Write it to disk in one shot
+        output_path.write_text(content, encoding='utf-8')
+        print(f"\n[*] Run results saved to {output_path}")
     def get_tool_schemas(self) -> list[dict]:
         tools = []
         type_map = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}
@@ -113,11 +125,11 @@ class KernelTools:
                 
                 # Append a bright, unmissable summary for the LLM
                 self.log_perf(target_name, status, base_ms, target_ms)
-                #summary = f"\n\n[SYSTEM NOTE: {status}! Your code ran in {target_ms:.2f}ms. It is {ratio:.2f}x {comp} than the baseline ({base_ms:.2f}ms).]"
                 summary = self.get_perf_log_for_llm()
+                perfsum = f"\n\n[SYSTEM NOTE: {status}! Your code ran in {target_ms:.2f}ms. It is {ratio:.2f}x {comp} than the baseline ({base_ms:.2f}ms).]"
                 print(summary)
-                #print(self.perf)
-                bench_out += summary
+                print(perfsum)
+                bench_out += summary + perfsum
 
         return {"success": bench_ok, "output": bench_out}
 
@@ -142,12 +154,14 @@ def call_llm(conv, tools, model, url, key):
             time.sleep(5)
             continue
         else:
-            break
-    return resp["choices"][0]["message"], resp.get("usage", {})
+            return resp["choices"][0]["message"], resp.get("usage", {})
+    raise RuntimeError("LLM did not return a valid response after 3 attempts.")
 
-def run_autonomous_loop(spec_prompt, toolkit, model, url, key):
+def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_iterations:int, context_compaction: Literal["no_compaction", "flush"]):
     total_in_tokens = 0
     total_out_tokens = 0
+
+    spec_prompt = "Optimize baseline.hpp by writing more efficient versions. Fore each attempt, create a new .hpp with the same structure as baseline.hpp and same function signature for matmul. Use the same function signature for matmul. Start without intrinsics. If you later want to use intrinsics, use NEON, but stay on one core (no openmp or similar). neon intrinsics are already included in the harness. you don't need to add it."
     sys_prompt = (
         "You are a C++ Optimization Agent. Do NOT use #includes in your generated files. "
         "Every file you evaluate is tested 1v1 against the baseline. If an approach fails to compile or is too slow, "
@@ -160,8 +174,8 @@ def run_autonomous_loop(spec_prompt, toolkit, model, url, key):
     
     conversation = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": spec_prompt}]
 
-    for iteration in range(MAX_ITERATIONS):
-        print(f"\n--- Iteration {iteration + 1}/{MAX_ITERATIONS} ---")
+    for iteration in range(max_iterations):
+        print(f"\n--- Iteration {iteration}/{max_iterations} ---")
         msg, usage = call_llm(conversation, toolkit.get_tool_schemas(), model, url, key)
         if usage:
             total_in_tokens += usage.get("prompt_tokens", 0)
@@ -185,40 +199,38 @@ def run_autonomous_loop(spec_prompt, toolkit, model, url, key):
                 res = getattr(toolkit, t_name)(**t_args)
             except Exception as e:
                 res = {"error": str(e)}
-
-            conversation.append({
-                "role": "tool", 
-                "tool_call_id": call["id"], 
-                "name": t_name, 
-                "content": json.dumps(res)
-            })
-            """
-            # We are not doing this for now.
-            if t_name == "write_and_evaluate_kernel" and res.get("success"):
-                print("Flushing context to save tokens...")
-                
-                # 1. Reset conversation to the original system and user prompts
-                conversation = [
-                    {"role": "system", "content": sys_prompt}, 
-                    {"role": "user", "content": spec_prompt}
-                ]
-                
-                # 2. Build the "catch-up" message using your new logging system
-                perf_state = toolkit.get_perf_log_for_llm()
-                target = t_args.get('name', 'your last attempt')
-                
-                catch_up_msg = (
-                    f"System Note: The context window was flushed to save memory.\n\n"
-                    f"Your last kernel (`{target}`) compiled and benched successfully. "
-                    f"Here is the leaderboard of all attempts so far:\n{perf_state}\n\n"
-                    f"If you need to see the code for any previous attempt, use the `read_file` tool. "
-                    f"Please continue optimizing."
-                )
-                
-                # 3. Append the catch-up message and skip the raw tool append
-                conversation.append({"role": "user", "content": catch_up_msg})
-                continue
-            """
+            if context_compaction == "no_compaction":
+                conversation.append({
+                    "role": "tool", 
+                    "tool_call_id": call["id"], 
+                    "name": t_name, 
+                    "content": json.dumps(res)
+                })
+            elif context_compaction == "flush":
+                if t_name == "write_and_evaluate_kernel" and res.get("success"):
+                    print("Flushing context to save tokens...")
+                    
+                    # 1. Reset conversation to the original system and user prompts
+                    conversation = [
+                        {"role": "system", "content": sys_prompt}, 
+                        {"role": "user", "content": spec_prompt}
+                    ]
+                    
+                    # 2. Build the "catch-up" message using your new logging system
+                    perf_state = toolkit.get_perf_log_for_llm()
+                    target = t_args.get('name', 'your last attempt')
+                    
+                    catch_up_msg = (
+                        f"System Note: The context window was flushed to save memory.\n\n"
+                        f"Your last kernel (`{target}`) compiled and benched successfully. "
+                        f"Here is the leaderboard of all attempts so far:\n{perf_state}\n\n"
+                        f"If you need to see the code for any previous attempt, use the `read_file` tool. "
+                        f"Please continue optimizing."
+                    )
+                    
+                    # 3. Append the catch-up message and skip the raw tool append
+                    conversation.append({"role": "user", "content": catch_up_msg})
+                    continue
 
 if __name__ == "__main__":
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -230,19 +242,17 @@ if __name__ == "__main__":
     #model = "openai/gpt-5-nano"
     #model ="google/gemini-2.5-flash"
     #model = "openai/gpt-5.4-mini"
-    url = "http://gx10:11434/v1/chat/completions" 
-    model = "gpt-oss:120b"
+    #url = "http://gx10:11434/v1/chat/completions" 
+    #model = "gpt-oss:20b"
     #model = "nemotron-3-super:120b"
     #model = "qwen3-coder-next"
     #model = "gemma4:31b"
-    model = "gemma4:e2b"
+    #model = "gemma4:e2b"
     #model = "gemma4:e4b"
     key = os.getenv("OPENROUTER")
     script_dir = Path(__file__).resolve().parent
     sandbox_dir = script_dir / "sandbox_bmm"
     build_dir = script_dir / "build"
     kernel_tools = KernelTools(sandbox_dir, build_dir)
-    run_autonomous_loop(
-        "Optimize baseline.hpp by writing more efficient versions. Create a new .hpp file for each attempt with the same structure as baseline.hpp for each attempt. Use the same function signature for matmul. Start without intrinsics. If you later want to use intrinsics, use NEON, but stay on one core (no openmp or similar). neon intrinsics are already included in the harness. you don't need to add it.", 
-        kernel_tools , model, url, key
-    )
+    run_autonomous_loop( kernel_tools , model, url, key, 5, "no_compaction")
+    kernel_tools.export_csv(model)
