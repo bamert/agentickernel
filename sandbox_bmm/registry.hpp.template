@@ -1,0 +1,32 @@
+#pragma once
+#include <vector>
+#include <string>
+#include <cstdint>
+#if defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
+// 1. Wrap every agent file in its own namespace to prevent ODR errors
+{% for method in methods %}
+namespace {{ method }} {
+    #include "{{ method }}.hpp"
+}
+{% endfor %}
+
+// 2. Define the struct our main.cpp loop expects
+struct KernelRegistry {
+    std::string name;
+    // UPDATED SIGNATURE: Matrix A, Matrix B, Matrix C, M (rows), K (inner dim)
+    void (*fn)(const float*, const uint32_t*, float*, size_t, size_t);
+};
+
+// 3. Populate and return the registry
+inline std::vector<KernelRegistry> all_match_kernels() {
+    return {
+    {% for method in methods %}
+        // Assumes every file defines a function literally named `matmul`
+        {"{{ method }}", {{ method }}::matmul}{% if not loop.last %},{% endif %}
+    {% endfor %}
+    };
+}
+

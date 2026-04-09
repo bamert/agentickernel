@@ -22,12 +22,12 @@ def run_cmd(cmd: list[str], cwd: Path) -> tuple[bool, str]:
         return False, f"SYSTEM ERROR: {str(e)}"
 
 class KernelTools:
-    def __init__(self):
+    def __init__(self, sandbox_dir: Path, build_dir: Path):
         self.script_dir = Path(__file__).resolve().parent
-        self.sandbox_dir = self.script_dir / "sandbox"
-        self.build_dir = self.script_dir / "build"
+        self.sandbox_dir = sandbox_dir
+        self.build_dir = build_dir
         self.sandbox_dir.mkdir(parents=True, exist_ok=True)
-        self.jinja_env = Environment(loader=FileSystemLoader(str(self.script_dir)))
+        self.jinja_env = Environment(loader=FileSystemLoader(str(self.sandbox_dir)))
         print(f"[*] Sandbox loaded at: {self.sandbox_dir}")
 
     def get_tool_schemas(self) -> list[dict]:
@@ -158,8 +158,11 @@ if __name__ == "__main__":
     #url = "http://gx10:11434/v1/chat/completions" 
     #model = "gemma4:e4b"
     key = os.getenv("OPENROUTER")
-    
+    script_dir = Path(__file__).resolve().parent
+    sandbox_dir = script_dir / "sandbox_bmm"
+    build_dir = script_dir / "build"
+    kernel_tools = KernelTools(sandbox_dir, build_dir)
     run_autonomous_loop(
         "Optimize baseline.hpp by writing more efficient versions. Create a new .hpp file for each attempt with the same structure as baseline.hpp for each attempt. Use the same function signature for dot product. ", 
-        KernelTools(), model, url, key
+        kernel_tools , model, url, key
     )
