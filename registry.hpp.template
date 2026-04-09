@@ -2,6 +2,9 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#if defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 // 1. Wrap every agent file in its own namespace to prevent ODR errors
 {% for method in methods %}

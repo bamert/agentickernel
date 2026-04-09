@@ -1,328 +1,165 @@
-import requests
-from pathlib import Path 
 import os
 import re
 import json
 import inspect
-from jinja2 import Environment, FileSystemLoader
 import subprocess
+import requests
+from pathlib import Path
+from jinja2 import Environment, FileSystemLoader
 
 MAX_ITERATIONS = 50
-MAX_RETRIES = 5
-PERF_GOAL_MS = 1.5
 
-def run_make_in_sandbox() -> str:
-    # Safely resolve cwd/sandbox relative to this Python file
-    sandbox_path = Path(__file__).parent / "sandbox"
-    
+def run_cmd(cmd: list[str], cwd: Path) -> tuple[bool, str]:
     try:
-        # stderr=subprocess.STDOUT merges errors directly into standard output.
-        # text=True automatically decodes the byte stream to a string.
-        process = subprocess.run(
-            ["make"],
-            cwd=sandbox_path,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=10 # Crucial: Prevents a weird build state from hanging the agent forever
+        proc = subprocess.run(
+            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=15
         )
-        
-        # We return everything. The LLM gets the raw terminal experience.
-        if process.returncode == 0:
-            return f"Make completed successfully:\n\n{process.stdout}"
-        else:
-            return f"Make failed (Exit code {process.returncode}):\n\n{process.stdout}"
-            
+        return proc.returncode == 0, proc.stdout
     except subprocess.TimeoutExpired as e:
-        # If make hangs, we catch it and feed the partial output back to the LLM
-        partial_out = e.stdout.decode('utf-8', errors='replace') if e.stdout else "No output."
-        return f"Build TIMED OUT after 10 seconds. Partial output:\n\n{partial_out}"
-    except FileNotFoundError:
-        return "System error: 'make' command not found. Is build-essential installed?"
+        out = e.stdout.decode('utf-8', errors='replace') if e.stdout else "No output."
+        return False, f"TIMED OUT after 15s.\n\n{out}"
     except Exception as e:
-        return f"System error executing make: {str(e)}"
-def build_registry(method_names: list[str]):
-    env = Environment(loader=FileSystemLoader("."))
-    template = env.get_template("registry.hpp.template")
-    rendered_cpp = template.render(methods=method_names)
-    output_path = Path(__file__).resolve().parent / "sandbox" / "registry.hpp"
-    Path(output_path).write_text(rendered_cpp, encoding="utf-8")
+        return False, f"SYSTEM ERROR: {str(e)}"
+
 class KernelTools:
-    """Base class that auto-discovers methods and generates OpenAI tool schemas."""
-    
     def __init__(self):
-        self.sandbox_dir = Path(__file__).resolve().parent / "sandbox"
+        self.script_dir = Path(__file__).resolve().parent
+        self.sandbox_dir = self.script_dir / "sandbox"
+        self.build_dir = self.script_dir / "build"
+        self.sandbox_dir.mkdir(parents=True, exist_ok=True)
+        self.jinja_env = Environment(loader=FileSystemLoader(str(self.script_dir)))
+        print(f"[*] Sandbox loaded at: {self.sandbox_dir}")
+
     def get_tool_schemas(self) -> list[dict]:
-        """Generates OpenAI-compatible function schemas from instance methods."""
         tools = []
         type_map = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}
-        
         for name, fn in inspect.getmembers(self, predicate=inspect.ismethod):
-            # Skip private methods and the schema generator itself
-            if name.startswith("_") or name == "get_tool_schemas": 
-                continue
-            
-            props = {
-                arg: {"type": type_map.get(t, "string")} 
-                for arg, t in fn.__annotations__.items() if arg != "return"
-            }
-            
+            if name.startswith("_") or name == "get_tool_schemas": continue
+            props = {arg: {"type": type_map.get(t, "string")} for arg, t in fn.__annotations__.items() if arg != "return"}
             tools.append({
                 "type": "function",
-                "function": {
-                    "name": name,
-                    "description": fn.__doc__ or "",
-                    "parameters": {
-                        "type": "object",
-                        "properties": props,
-                        "required": list(props.keys())
-                    }
-                }
+                "function": {"name": name, "description": fn.__doc__ or "", "parameters": {"type": "object", "properties": props, "required": list(props.keys())}}
             })
         return tools
 
+    def _sync_registry(self, target_name: str):
+        """Builds a 1v1 registry containing ONLY the baseline and the current attempt."""
+        target_stem = Path(target_name).stem
+        methods = ["baseline", target_stem]
+        try:
+            template = self.jinja_env.get_template("registry.hpp.template")
+            (self.sandbox_dir / "registry.hpp").write_text(template.render(methods=methods), encoding="utf-8")
+        except Exception as e:
+            print(f"  !! Registry Sync Failed: {e}")
+
     def write_and_evaluate_kernel(self, name: str, content: str) -> dict:
-        """Writes kernel code to a file and triggers the evaluation pipeline."""
+        if not name.endswith(".hpp"): name += ".hpp"
+        target_path = self.sandbox_dir / name
+        target_name = Path(name).stem
         
-        if name.lower().endswith(".cpp"):
-            return {"error": "Direct .cpp file writing is blocked. Please write implementation into the hpp file like in baseline.hpp"}
-        # Enforces a flat filename. Allows an optional extension but completely blocks slashes and directory traversal.
-        if not re.match(r"^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9]+)?$", name):
-            return {"error": "Invalid name: must be a flat filename without subfolders (e.g., 'kernel' or 'kernel.cpp')."}
-            
-        file_path = self.sandbox_dir / name
+        print(f"\n[PROPOSING] {name}")
+        target_path.write_text(content, encoding="utf-8")
+        self._sync_registry(name)
         
-        try:
-            file_path.write_text(content, encoding="utf-8")
-        except Exception as e:
-            return {"error": f"Failed to write file: {str(e)}"}
-            
-        # Compile -> Test -> Benchmark 
-        # (To be implemented)
-        # Write method names
+        print("  -> Compiling 1v1 Benchmark...")
+        compile_ok, compile_out = run_cmd(["make"], self.build_dir)
+        if not compile_ok:
+            print("  !! Compilation Failed.")
+            return {"success": False, "output": f"COMPILATION FAILED:\n\n{compile_out[:2000]}"}
 
-        print("Rebuilding registry with current sandbox files...")
-        method_names = [f.stem for f in self.sandbox_dir.iterdir() if f.is_file() and str(f).endswith(".hpp") and f.stem != "registry"]
-        print("Current kernel files in sandbox:", method_names)
-        build_registry(method_names)
-        output = run_make_in_sandbox()
-        
-        return {
-            "success": True, 
-            "filepath": name,
-            "output": output
-        }
+        print("  -> Benchmarking...")
+        # Add the CSV flag right here!
+        bench_ok, bench_out = run_cmd(["./test_and_bench", "--benchmark_format=csv"], self.build_dir)
+        print(f"  -> Benchmark complete. (Exit code 0: {bench_ok})")
+
+        # --- EXTRACT RUNTIMES FROM CSV ---
+        if compile_ok and bench_ok:
+            # Look for the quoted names in the CSV output
+            base_match = re.search(r'^"baseline",\d+,([^,]+),', bench_out, re.MULTILINE)
+            target_match = re.search(rf'^"{target_name}",\d+,([^,]+),', bench_out, re.MULTILINE)
+
+            if base_match and target_match:
+                base_ns = float(base_match.group(1))
+                target_ns = float(target_match.group(1))
+                
+                is_faster = target_ns < base_ns
+                ratio = (base_ns / target_ns) if is_faster else (target_ns / base_ns)
+                status = "SUCCESS" if is_faster else "FAILURE"
+                comp = "FASTER" if is_faster else "SLOWER"
+                
+                # Append a bright, unmissable summary for the LLM
+                summary = f"\n\n[SYSTEM NOTE: {status}! Your code ran in {target_ns/1e6:.2f}ms. It is {ratio:.2f}x {comp} than the baseline ({base_ns/1e6:.2f}ms).]"
+                print(summary)
+                bench_out += summary
+
+        return {"success": bench_ok, "output": bench_out}
+
     def read_file(self, name: str) -> dict:
-        """Reads a file, strictly enforcing a flat filename (extensions allowed, subfolders blocked)."""
-        # Whitelist: Allow alphanumeric, dashes, underscores, and an optional extension.
-        # This completely blocks slashes (/) and directory traversal (../).
-        if not re.match(r"^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9]+)?$", name):
-            return {"error": "Invalid name: must be a flat filename without subfolders (e.g., 'kernel' or 'kernel.cpp')."}
-        
-        file_path = self.sandbox_dir / name
-        
-        if not file_path.exists():
-            return {"error": f"File '{name}' does not exist."}
-        if not file_path.is_file():
-            return {"error": f"'{name}' is a directory, not a file."}
-            
-        try:
-            return {"success": True, "content": file_path.read_text(encoding="utf-8")}
-        except Exception as e:
-            return {"error": f"Failed to read file: {str(e)}"}
+        p = self.sandbox_dir / name
+        print(f"\n[READ FILE] {name}")
+        return {"success": True, "content": p.read_text()} if p.is_file() else {"error": "Not found"}
+
     def list_files(self) -> dict:
-        try:
-            # Iterate through the immediate directory only and filter out folders
-            files = [f.name for f in self.sandbox_dir.iterdir() if f.is_file()]
-            return {"success": True, "files": sorted(files)}
-        except Exception as e:
-            return {"error": f"Failed to list files: {str(e)}"}
+        return {"success": True, "files": sorted([f.name for f in self.sandbox_dir.iterdir() if f.is_file()])}
 
-def call_llm(conversation: list[dict], new_prompt: str, tools: list[dict], model: str, base_url: str, api_key: str = "") -> dict:
-    """
-    Appends a new prompt to the conversation and calls the LLM.
-    Works with OpenAI, OpenRouter, or Ollama depending on base_url.
-    """
-    if new_prompt:
-        conversation.append({"role": "user", "content": new_prompt})
-        
-    payload = {
-        "model": model,
-        "messages": conversation,
-        "tools": tools,
-        "stream": False
-    }
-    
-    # Remove tools if empty to prevent API validation errors
-    if not tools:
-        del payload["tools"]
+# --- PURE STATELESS REPL ---
 
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    print(headers)
+def call_llm(conv, tools, model, url, key):
+    headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {key}"} if key else {})}
+    payload = {"model": model, "messages": conv, "tools": tools}
+    r = requests.post(url, json=payload, headers=headers)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]
 
-    # Ensure correct endpoint routing
-    endpoint = base_url
+def run_autonomous_loop(spec_prompt, toolkit, model, url, key):
+    sys_prompt = (
+        "You are a C++ Optimization Agent. Do NOT use #includes in your generated files. "
+        "Every file you evaluate is tested 1v1 against the baseline. If an approach fails to compile or is too slow, "
+        "you can either try to fix it in the same file, or abandon it and start a completely new file."
+    )
     
-    response = requests.post(endpoint, json=payload, headers=headers)
-    response.raise_for_status()
+    base_file = toolkit.sandbox_dir / "baseline.hpp"
+    if base_file.exists(): 
+        sys_prompt += f"\n\nBaseline Reference:\n{base_file.read_text()}\n"
     
-    # Return the raw message object (contains 'content' and potentially 'tool_calls')
-    return response.json()["choices"][0]["message"]
+    conversation = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": spec_prompt}]
 
-def process_tool_call(tool_call: dict, toolkit: KernelTools) -> dict:
-    """
-    Executes a specific tool call and returns the properly formatted 
-    dictionary ready to be appended to the conversation history.
-    """
-    name = tool_call["function"]["name"]
-    args = json.loads(tool_call["function"]["arguments"])
-    
-    try:
-        # Dynamically call the method on the toolkit
-        fn = getattr(toolkit, name)
-        result = fn(**args)
-        content = json.dumps(result)
-    except Exception as e:
-        content = json.dumps({"error": str(e)})
-        
-    # Return the exact dict format OpenAI expects for tool results.
-    # You can intercept and modify this return value outside this function.
-    return {
-        "role": "tool",
-        "tool_call_id": tool_call["id"],
-        "name": name,
-        "content": content
-    }
-
-
-def build_system_context(locked_files: set, summaries: list, graveyard: list) -> str:
-    """Dynamically generates the system prompt based on current episodic memory."""
-    prompt = "You are an autonomous kernel optimization agent. Your goal is to maximize performance.\n"
-    prompt += f"Target Performance: {PERF_GOAL_MS}ms.\n\n"
-    
-    if locked_files:
-        prompt += f"LOCKED FILES (Passed tests, do not modify): {', '.join(locked_files)}\n"
-    if summaries:
-        prompt += "SUCCESSFUL OPTIMIZATIONS:\n" + "\n".join(f"- {s}" for s in summaries) + "\n"
-    if graveyard:
-        prompt += "GRAVEYARD (Failed approaches, do not repeat):\n" + "\n".join(f"- {g}" for g in graveyard) + "\n"
-        
-    prompt += "\nRules: Read files to understand state. Use `write_and_evaluate_kernel` to propose, compile, and test optimizations in one step. Attempts to overwrite locked files will be blocked."
-    prompt += "\n Read `baseline.hpp` for the desired function signature"
-    return prompt
-
-def run_autonomous_loop(spec_prompt: str, toolkit: KernelTools, model: str, base_url: str, api_key: str = ""):
-    locked_files = set()
-    summaries = []
-    graveyard = []
-    
-    # Initialize the episodic context
-    conversation = [{"role": "system", "content": build_system_context(locked_files, summaries, graveyard)}]
-    conversation.append({"role": "user", "content": spec_prompt})
-    
-    local_retries = 0
-    tools_schema = toolkit.get_tool_schemas()
-    
     for iteration in range(MAX_ITERATIONS):
-        print(f"\n--- Iteration {iteration + 1} | Retries: {local_retries}/{MAX_RETRIES} ---")
+        print(f"\n--- Iteration {iteration + 1}/{MAX_ITERATIONS} ---")
+        msg = call_llm(conversation, toolkit.get_tool_schemas(), model, url, key)
+        conversation.append(msg)
         
-        # 1. Call LLM
-        llm_msg = call_llm(conversation, None, tools_schema, model, base_url, api_key)
-        conversation.append(llm_msg)
-        
-        if llm_msg.get("content"):
-            print(f"Agent: {llm_msg['content']}")
+        if msg.get("content"):
+            print(f"Agent:\n{msg['content']}\n")
             
-        # 2. Process Tool Calls
-        if "tool_calls" not in llm_msg or not llm_msg["tool_calls"]:
-            conversation.append({"role": "user", "content": "Please continue optimizing or call the write_and_evaluate_kernel tool."})
+        if not msg.get("tool_calls"):
+            conversation.append({"role": "user", "content": "Please continue working by calling a tool."})
             continue
             
-        for t_call in llm_msg["tool_calls"]:
-            name = t_call["function"]["name"]
-            args = json.loads(t_call["function"]["arguments"])
+        for call in msg["tool_calls"]:
+            t_name = call["function"]["name"]
+            t_args = json.loads(call["function"]["arguments"])
             
-            # A. WRITE-LOCK SAFEGUARD (Now checks the unified tool)
-            if name == "write_and_evaluate_kernel" and args.get("filepath") in locked_files:
-                print(f"[BLOCKED] Agent attempted to write to locked file: {args.get('filepath')}")
-                conversation.append({
-                    "role": "tool",
-                    "tool_call_id": t_call["id"],
-                    "name": name,
-                    "content": json.dumps({"error": f"File {args.get('filepath')} is LOCKED. It already passed tests. Read-only."})
-                })
-                continue
-                
-            # B. EXECUTE TOOL
-            tool_result_msg = process_tool_call(t_call, toolkit)
-            conversation.append(tool_result_msg)
-            
-            # C. EVALUATION & EPISODIC MEMORY TRIGGER
-            if name == "write_and_evaluate_kernel":
-                result_data = json.loads(tool_result_msg["content"])
-                
-                # Success Path
-                if result_data.get("success") == True:
-                    perf = result_data.get("perf_ms", 999)
-                    
-                    target_file = result_data.get("filepath") or args.get("filepath") 
-                    if target_file:
-                        locked_files.add(target_file)
-                        print(f"[LOCKED] {target_file} passed tests at {perf}ms.")
-                        
-                    # Append the prompt to the EXISTING conversation so the LLM can see its own work
-                    conversation.append({
-                        "role": "user", 
-                        "content": f"The code passed tests! Perf: {perf}ms. Look at the code you just wrote above and write a 1-sentence summary of the exact optimization technique you successfully applied."
-                    })
-                    
-                    # Call the LLM with the full context (no tools needed for the summary)
-                    summary_msg = call_llm(conversation, None, [], model, base_url, api_key)
-                    summaries.append(summary_msg.get("content", f"Successful optimization applied at {perf}ms."))
-                    
-                    if perf <= PERF_GOAL_MS:
-                        print(f"\n[GOAL REACHED] Performance goal of {PERF_GOAL_MS}ms met!")
-                        return
-                        
-                    # Context Reset: NOW we flush tokens, keeping only the episodic memory
-                    print("[CONTEXT RESET] Optimization successful. Flushing tokens.")
-                    conversation = [{"role": "system", "content": build_system_context(locked_files, summaries, graveyard)}]
-                    conversation.append({"role": "user", "content": f"Last optimization succeeded. Current perf: {perf}ms. Propose the NEXT distinct optimization."})
-                    local_retries = 0
-                    
-                # Failure Path
-                else:
-                    local_retries += 1
-                    print(f"[FAILED] Test/Compile failed. Retry {local_retries}/{MAX_RETRIES}")
-                    
-                    if local_retries >= MAX_RETRIES:
-                        # (Keep the Graveyard logic here exactly as it was)
-                        conversation.append({
-                            "role": "user", 
-                            "content": f"We failed {MAX_RETRIES} times. Look at the code and error above. Write a 1-sentence post-mortem explaining why this specific approach failed so we don't repeat it."
-                        })
-                        pm_msg = call_llm(conversation, None, [], model, base_url, api_key)
-                        graveyard.append(pm_msg.get("content", "Approach failed after max retries."))
-                        
-                        print("[GRAVEYARD] Approach abandoned. Flushing tokens.")
-                        conversation = [{"role": "system", "content": build_system_context(locked_files, summaries, graveyard)}]
-                        conversation.append({"role": "user", "content": "Previous approach failed and is in the graveyard. Start a completely NEW angle. Do not repeat failed methods."})
-                        local_retries = 0
-                        
-                    else:
-                        # ADD THIS: Explicitly nudge the model to fix the error it just received
-                        conversation.append({
-                            "role": "user",
-                            "content": f"The evaluation failed (see tool output above). You have {MAX_RETRIES - local_retries} retries left for this approach. Please fix the exact error and call the evaluation tool again."
-                        })
+            try:
+                res = getattr(toolkit, t_name)(**t_args)
+            except Exception as e:
+                res = {"error": str(e)}
+
+            conversation.append({
+                "role": "tool", 
+                "tool_call_id": call["id"], 
+                "name": t_name, 
+                "content": json.dumps(res)
+            })
+
 if __name__ == "__main__":
-    # Example usage assuming toolkit, MODEL, and BASE_URL are defined
-    #BASE_URL = "http://gx10:11434/v1/chat/completions" 
-    BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-    MODEL = "gemini-2.5-flash-lite-preview-09-2025"
-    API_KEY = os.getenv("OPENROUTER")
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    model = "google/gemini-3-flash-preview"
+    #url = "http://gx10:11434/v1/chat/completions" 
+    #model = "gemma4:e4b"
+    key = os.getenv("OPENROUTER")
     
-    toolkit = KernelTools()
-    run_autonomous_loop("Optimize the kernel in baseline.hpp by writing more efficient versions of it with the same function signature. Create new files for each version" , toolkit, MODEL, BASE_URL, API_KEY)
+    run_autonomous_loop(
+        "Optimize baseline.hpp by writing more efficient versions. Create a new .hpp file for each attempt with the same structure as baseline.hpp for each attempt. Use the same function signature for dot product. ", 
+        KernelTools(), model, url, key
+    )

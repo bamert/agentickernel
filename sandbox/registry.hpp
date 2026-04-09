@@ -2,6 +2,9 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#if defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 // 1. Wrap every agent file in its own namespace to prevent ODR errors
 
@@ -9,16 +12,8 @@ namespace baseline {
     #include "baseline.hpp"
 }
 
-namespace optimized_v2 {
-    #include "optimized_v2.hpp"
-}
-
-namespace optimized_v3 {
-    #include "optimized_v3.hpp"
-}
-
-namespace optimized_v1 {
-    #include "optimized_v1.hpp"
+namespace attempt_24 {
+    #include "attempt_24.hpp"
 }
 
 
@@ -34,11 +29,7 @@ inline std::vector<KernelRegistry> all_match_kernels() {
     
         {"baseline", baseline::dot_product},
     
-        {"optimized_v2", optimized_v2::dot_product},
-    
-        {"optimized_v3", optimized_v3::dot_product},
-    
-        {"optimized_v1", optimized_v1::dot_product}
+        {"attempt_24", attempt_24::dot_product}
     
     };
 }
