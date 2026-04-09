@@ -12,8 +12,8 @@ namespace baseline {
     #include "baseline.hpp"
 }
 
-namespace attempt_5 {
-    #include "attempt_5.hpp"
+namespace v43_octa_stack {
+    #include "v43_octa_stack.hpp"
 }
 
 
@@ -32,7 +32,7 @@ inline std::vector<KernelRegistry> all_match_kernels() {
         {"baseline", baseline::matmul},
     
         // Assumes every file defines a function literally named `matmul`
-        {"attempt_5", attempt_5::matmul}
+        {"v43_octa_stack", v43_octa_stack::matmul}
     
     };
 }

@@ -31,14 +31,19 @@ class KernelTools:
         self.jinja_env = Environment(loader=FileSystemLoader(str(self.sandbox_dir)))
         self.perf: dict[str,str] = {} # method to outcome mapping (if multiple attempts were made, only latest one)
         self.log = [] # chronological log and perf  (for all attempts)
+        self.fastest_time_ms = float('inf')
+        self.fastest_method = "baseline"
         print(f"[*] Sandbox loaded at: {self.sandbox_dir}")
 
 
     def log_perf(self, target_name:str, message: str, baseline_ms:float=-1., target_ms:float=-1.):
         iteration = len(self.log)
+        if target_ms > 0 and target_ms < self.fastest_time_ms:
+            self.fastest_time_ms = target_ms
+            self.fastest_method = target_name
         if len(self.log) == 0:
             self.log.append(f"{iteration}, baseline,{message},{baseline_ms}, 1.00")
-        self.log.append(f"{iteration+1}, {target_name},{message},{target_ms}, {(baseline_ms/target_ms)}")
+        self.log.append(f"{iteration+1}, {target_name},{message},{target_ms}, {(baseline_ms/target_ms):.2f}")
         self.perf["baseline"] = f"{baseline_ms}ms"
         self.perf[target_name] = f"{target_ms}ms"
     def get_perf_log_for_llm(self) -> str:
@@ -120,7 +125,13 @@ class KernelTools:
                 
                 is_faster = target_ns < base_ns
                 ratio = (base_ns / target_ns) if is_faster else (target_ns / base_ns)
-                status = "SUCCESS" if is_faster else "FAILURE"
+                is_fastest = target_ms < self.fastest_time_ms
+                if is_fastest:
+                    status = "SUCCESS (This is the new fastest solution)"
+                elif is_faster:
+                    status = f"GOOD (Faster than the baseline, but slower than the so far fastest method:{self.fastest_method})"
+                else:
+                    status = "FAILURE (slower than baseline)"
                 comp = "FASTER" if is_faster else "SLOWER"
                 
                 # Append a bright, unmissable summary for the LLM
@@ -254,5 +265,5 @@ if __name__ == "__main__":
     sandbox_dir = script_dir / "sandbox_bmm"
     build_dir = script_dir / "build"
     kernel_tools = KernelTools(sandbox_dir, build_dir)
-    run_autonomous_loop( kernel_tools , model, url, key, 5, "no_compaction")
+    run_autonomous_loop( kernel_tools , model, url, key, 50, "no_compaction")
     kernel_tools.export_csv(model)
