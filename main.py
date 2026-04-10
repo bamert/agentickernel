@@ -1,6 +1,10 @@
+import argparse
+import sys
+import traceback
 import os
 from typing import Literal
 import time
+from datetime import datetime
 import re
 import json
 import inspect
@@ -23,27 +27,38 @@ def run_cmd(cmd: list[str], cwd: Path) -> tuple[bool, str]:
         return False, f"SYSTEM ERROR: {str(e)}"
 
 class KernelTools:
-    def __init__(self, sandbox_dir: Path, build_dir: Path):
+    def __init__(self, sandbox_dir: Path, implementation_name:str, build_dir: Path):
         self.script_dir = Path(__file__).resolve().parent
         self.sandbox_dir = sandbox_dir
+        self.implementation_name = implementation_name
+        self.implementation_dir = sandbox_dir / implementation_name
         self.build_dir = build_dir
-        self.sandbox_dir.mkdir(parents=True, exist_ok=True)
+        self.implementation_dir.mkdir(parents=True, exist_ok=True)
         self.jinja_env = Environment(loader=FileSystemLoader(str(self.sandbox_dir)))
         self.perf: dict[str,str] = {} # method to outcome mapping (if multiple attempts were made, only latest one)
         self.log = [] # chronological log and perf  (for all attempts)
         self.fastest_time_ms = float('inf')
         self.fastest_method = "baseline"
+        self.current_loop_iter = 0
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.cumulative_cost = 0.0
+        self.start_time = time.time()
         print(f"[*] Sandbox loaded at: {self.sandbox_dir}")
+        print(f"[*] Agent is allowed to read and write files inside : {self.implementation_dir}")
 
 
     def log_perf(self, target_name:str, message: str, baseline_ms:float=-1., target_ms:float=-1.):
-        iteration = len(self.log)
+        wall_time = time.time() - self.start_time # Calculate elapsed time
+        
         if target_ms > 0 and target_ms < self.fastest_time_ms:
             self.fastest_time_ms = target_ms
             self.fastest_method = target_name
+            
         if len(self.log) == 0:
-            self.log.append(f"{iteration}, baseline,{message},{baseline_ms}, 1.00")
-        self.log.append(f"{iteration+1}, {target_name},{message},{target_ms}, {(baseline_ms/target_ms):.2f}")
+            self.log.append(f"{self.current_loop_iter}, baseline,{message},{baseline_ms}, 1.00, {self.tokens_in}, {self.tokens_out}, 0, {wall_time:.1f}")
+        
+        self.log.append(f"{self.current_loop_iter}, {target_name},{message},{target_ms}, {(baseline_ms/target_ms):.2f}, {self.tokens_in}, {self.tokens_out}, {self.cumulative_cost}, {wall_time:.1f}")
         self.perf["baseline"] = f"{baseline_ms}ms"
         self.perf[target_name] = f"{target_ms}ms"
     def get_perf_log_for_llm(self) -> str:
@@ -51,14 +66,14 @@ class KernelTools:
         for k,v in self.perf.items():
             status += f"{k}: {v}. \n"
         return status
-    def export_csv(self, model: str):
+    def export_csv(self, compaction_mode:str):
         """Exports the chronological log to a CSV file using pathlib."""
-        model_descriptor = model.replace("/","_")
-        output_path = self.script_dir / f"benchmark_{model_descriptor}_results.csv"
+        timestamp = datetime.now().strftime("%y%m%d%H%M")
+        output_path = self.script_dir / f"benchmark_{self.implementation_name}_results_{timestamp}.csv"
         
         # Build the entire CSV content as a single string
-        content = "model,iteration,target,message,target_ms,speedup\n"
-        content += "".join(f'"{model_descriptor}",{entry}\n' for entry in self.log)
+        content = "model,iteration,target,message,target_ms,speedup,tokens_in,tokens_out,cumulative_cost_usd, wall_time_sec\n"
+        content += "".join(f'"{self.implementation_name},{compaction_mode}",{entry}\n' for entry in self.log)
         
         # Write it to disk in one shot
         output_path.write_text(content, encoding='utf-8')
@@ -67,7 +82,8 @@ class KernelTools:
         tools = []
         type_map = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}
         for name, fn in inspect.getmembers(self, predicate=inspect.ismethod):
-            if name.startswith("_") or name == "get_tool_schemas": continue
+            if name != "write_and_evaluate_kernel":
+                continue
             props = {arg: {"type": type_map.get(t, "string")} for arg, t in fn.__annotations__.items() if arg != "return"}
             tools.append({
                 "type": "function",
@@ -77,19 +93,22 @@ class KernelTools:
 
     def _sync_registry(self, target_name: str):
         """Builds a 1v1 registry containing ONLY the baseline and the current attempt."""
-        target_stem = Path(target_name).stem
-        methods = ["baseline", target_stem]
-        try:
-            template = self.jinja_env.get_template("registry.hpp.template")
-            (self.sandbox_dir / "registry.hpp").write_text(template.render(methods=methods), encoding="utf-8")
-        except Exception as e:
-            print(f"  !! Registry Sync Failed: {e}")
+        method_name = Path(target_name).stem
+        template = self.jinja_env.get_template("registry.hpp.template")
+        (self.sandbox_dir / "registry.hpp").write_text(template.render(method_name=method_name, implementation_name=self.implementation_name), encoding="utf-8")
 
     def write_and_evaluate_kernel(self, name: str, content: str) -> dict:
         if not name.endswith(".hpp"): name += ".hpp"
-        target_path = self.sandbox_dir / name
+        target_path = self.implementation_dir / name
         target_name = Path(name).stem
-        
+        banned_keywords = [r'\bstatic\b', r'\bthread_local\b', r'\bextern\b', r'\basm\b', r'\b__asm__\b']
+        for keyword in banned_keywords:
+            if re.search(keyword, content):
+                return {
+                    "success": False, 
+                    "output": f"COMPILATION FAILED:\n\nRULE VIOLATION: The keyword '{keyword.replace(r'\\b', '')}' is strictly banned. The function must be 100% stateless and use pure C++ intrinsics without inline assembly."
+                }
+       
         print(f"\n[PROPOSING] {name}")
         target_path.write_text(content, encoding="utf-8")
         self._sync_registry(name)
@@ -106,7 +125,6 @@ class KernelTools:
                 filtered_out = compile_out[:1000] # Fallback for linker errors
             return {"success": False, "output": f"COMPILATION FAILED:\n\n{filtered_out}"}
 
-        # Add the CSV flag right here!
         bench_ok, bench_out = run_cmd(["./test_and_bench", "--benchmark_format=csv"], self.build_dir)
         print(f"  -> Benchmark {"complete" if bench_ok else "failed"}")
         if not bench_ok:
@@ -126,10 +144,10 @@ class KernelTools:
                 is_faster = target_ns < base_ns
                 ratio = (base_ns / target_ns) if is_faster else (target_ns / base_ns)
                 is_fastest = target_ms < self.fastest_time_ms
-                if is_fastest:
+                if is_fastest and is_faster:
                     status = "SUCCESS (This is the new fastest solution)"
                 elif is_faster:
-                    status = f"GOOD (Faster than the baseline, but slower than the so far fastest method:{self.fastest_method})"
+                    status = f"GOOD (Faster than baseline, but slower than current best: {self.fastest_time_ms:.2f}ms)"
                 else:
                     status = "FAILURE (slower than baseline)"
                 comp = "FASTER" if is_faster else "SLOWER"
@@ -145,12 +163,12 @@ class KernelTools:
         return {"success": bench_ok, "output": bench_out}
 
     def read_file(self, name: str) -> dict:
-        p = self.sandbox_dir / name
+        p = self.implementation_dir / name
         print(f"\n[READ FILE] {name}")
         return {"success": True, "content": p.read_text()} if p.is_file() else {"error": "Not found"}
 
     def list_files(self) -> dict:
-        return {"success": True, "files": sorted([f.name for f in self.sandbox_dir.iterdir() if f.is_file()])}
+        return {"success": True, "files": sorted([f.name for f in self.implementation_dir.iterdir() if f.is_file()])}
 
 # --- PURE STATELESS REPL ---
 
@@ -168,16 +186,17 @@ def call_llm(conv, tools, model, url, key):
             return resp["choices"][0]["message"], resp.get("usage", {})
     raise RuntimeError("LLM did not return a valid response after 3 attempts.")
 
-def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_iterations:int, context_compaction: Literal["no_compaction", "flush"]):
+def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_iterations:int, cost_in_per_million:float, cost_out_per_million:float, budget_limit:float, context_compaction: Literal["none", "flush"]):
     total_in_tokens = 0
     total_out_tokens = 0
+    cumulative_cost = 0.0
 
-    spec_prompt = "Optimize baseline.hpp by writing more efficient versions. Fore each attempt, create a new .hpp with the same structure as baseline.hpp and same function signature for matmul. Use the same function signature for matmul. Start without intrinsics. If you later want to use intrinsics, use NEON, but stay on one core (no openmp or similar). neon intrinsics are already included in the harness. you don't need to add it."
     sys_prompt = (
-        "You are a C++ Optimization Agent. Do NOT use #includes in your generated files. "
+        "You are a C++ Optimization Agent. Do NOT use #includes in your generated files. Do NOT use the `static` keyword in your code or anything else to persist data across invocations."
         "Every file you evaluate is tested 1v1 against the baseline. If an approach fails to compile or is too slow, "
         "you can either try to fix it in the same file, or abandon it and start a completely new file."
     )
+    spec_prompt = "Optimize baseline.hpp by writing more efficient versions. Fore each attempt, create a new .hpp with the same structure as baseline.hpp and same function signature for matmul. Use the same function signature for matmul. Start without intrinsics. If you later want to use intrinsics, use NEON, but stay on one core (no openmp or similar). neon intrinsics are already included in the harness. you don't need to add it."
     
     base_file = toolkit.sandbox_dir / "baseline.hpp"
     if base_file.exists(): 
@@ -191,8 +210,17 @@ def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_it
         if usage:
             total_in_tokens += usage.get("prompt_tokens", 0)
             total_out_tokens += usage.get("completion_tokens", 0)
-            print(f"  [Tokens] In: {total_in_tokens} | Out: {total_out_tokens}")
-
+            in_cost = (total_in_tokens / 1_000_000) * cost_in_per_million 
+            out_cost = (total_out_tokens / 1_000_000) * cost_out_per_million
+            cumulative_cost = in_cost + out_cost if (cost_in_per_million > 0 or cost_out_per_million > 0) else 0.0
+            print(f"  [Tokens] In: {total_in_tokens} | Out: {total_out_tokens} | Cumulative Cost: ${cumulative_cost:.4f}")
+        toolkit.current_loop_iter = iteration + 1
+        toolkit.tokens_in = total_in_tokens
+        toolkit.tokens_out = total_out_tokens
+        if budget_limit > 0 and cumulative_cost >= budget_limit:
+            print(f"\n[!] BUDGET LIMIT REACHED (${cumulative_cost:.2f} >= ${budget_limit}). Terminating")
+            break 
+        toolkit.cumulative_cost = cumulative_cost
         conversation.append(msg)
         
         if msg.get("content"):
@@ -210,13 +238,14 @@ def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_it
                 res = getattr(toolkit, t_name)(**t_args)
             except Exception as e:
                 res = {"error": str(e)}
-            if context_compaction == "no_compaction":
+            if context_compaction == "none":
                 conversation.append({
                     "role": "tool", 
                     "tool_call_id": call["id"], 
                     "name": t_name, 
                     "content": json.dumps(res)
                 })
+                conversation.append({"role": "user", "content": "Please continue working by calling a tool. Pick the optimization path that you think is most likely to succeed based on the feedback you have received so far."})
             elif context_compaction == "flush":
                 if t_name == "write_and_evaluate_kernel" and res.get("success"):
                     print("Flushing context to save tokens...")
@@ -244,26 +273,34 @@ def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_it
                     continue
 
 if __name__ == "__main__":
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    model = "google/gemini-3-flash-preview"
-    #model = "google/gemini-3.1-pro-preview"
-    #model = "google/gemma-4-31b-it"
-    #model = "google/gemini-2.5-pro"
-    #model = "z-ai/glm-5.1"
-    #model = "openai/gpt-5-nano"
-    #model ="google/gemini-2.5-flash"
-    #model = "openai/gpt-5.4-mini"
-    #url = "http://gx10:11434/v1/chat/completions" 
-    #model = "gpt-oss:20b"
-    #model = "nemotron-3-super:120b"
-    #model = "qwen3-coder-next"
-    #model = "gemma4:31b"
-    #model = "gemma4:e2b"
-    #model = "gemma4:e4b"
+    parser = argparse.ArgumentParser(description="Run the Autonomous Optimization Agent")
+    parser.add_argument("--url", type=str, required=True, help="OpenAI compatible /completions API endpoint URL (e.g., http://localhost/v1/chat/completions)")
+    parser.add_argument("--model", type=str, required=True, help="Model identifier (e.g., 'gpt-oss:20b')")
+    parser.add_argument("--cost_out_per_million", type=float, required=False, default=0, help="Cost per million output tokens in $")
+    parser.add_argument("--cost_in_per_million", type=float, required=False, default=0, help="Cost per million input tokens in $")
+    parser.add_argument("--budget_limit", type=float, required=False, default=0, help="Budget Limit for the$")
+    parser.add_argument(
+        "--compaction", 
+        type=str, 
+        choices=["none", "flush"], 
+        default="none", 
+        help="Context compaction mode: 'none' (default) or 'flush'."
+    )
+    args = parser.parse_args()
     key = os.getenv("OPENROUTER")
     script_dir = Path(__file__).resolve().parent
     sandbox_dir = script_dir / "sandbox_bmm"
     build_dir = script_dir / "build"
-    kernel_tools = KernelTools(sandbox_dir, build_dir)
-    run_autonomous_loop( kernel_tools , model, url, key, 50, "no_compaction")
-    kernel_tools.export_csv(model)
+    implementation_name =  args.model.replace("/","_").replace(":","_")
+    kernel_tools = KernelTools(sandbox_dir, implementation_name, build_dir)
+    try:
+        run_autonomous_loop(kernel_tools, args.model, args.url, key, 50, args.cost_in_per_million, args.cost_out_per_million, args.budget_limit, args.compaction)
+    except KeyboardInterrupt:
+        print("\n[!] Loop aborted by user (Ctrl+C). Saving progress...")
+        sys.exit(130) 
+    except Exception as e:
+        print(f"\n[!] Error encountered: {e}")
+        traceback.print_exc()  # This prints the actual error line so you aren't flying blind!
+        sys.exit(1) #To abort outer loop as well 
+    finally:
+        kernel_tools.export_csv(args.compaction)

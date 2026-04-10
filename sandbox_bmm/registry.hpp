@@ -7,15 +7,12 @@
 #endif
 
 // 1. Wrap every agent file in its own namespace to prevent ODR errors
-
-namespace baseline {
+namespace  baseline  {
     #include "baseline.hpp"
 }
-
-namespace v43_octa_stack {
-    #include "v43_octa_stack.hpp"
+namespace optimized22 {
+    #include "gpt-oss_120b/optimized22.hpp"
 }
-
 
 // 2. Define the struct our main.cpp loop expects
 struct KernelRegistry {
@@ -27,12 +24,8 @@ struct KernelRegistry {
 // 3. Populate and return the registry
 inline std::vector<KernelRegistry> all_match_kernels() {
     return {
-    
         // Assumes every file defines a function literally named `matmul`
         {"baseline", baseline::matmul},
-    
-        // Assumes every file defines a function literally named `matmul`
-        {"v43_octa_stack", v43_octa_stack::matmul}
-    
+        {"optimized22", optimized22::matmul}
     };
 }

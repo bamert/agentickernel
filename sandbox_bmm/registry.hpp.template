@@ -7,11 +7,12 @@
 #endif
 
 // 1. Wrap every agent file in its own namespace to prevent ODR errors
-{% for method in methods %}
-namespace {{ method }} {
-    #include "{{ method }}.hpp"
+namespace  baseline  {
+    #include "baseline.hpp"
 }
-{% endfor %}
+namespace {{ method_name }} {
+    #include "{{implementation_name}}/{{ method_name }}.hpp"
+}
 
 // 2. Define the struct our main.cpp loop expects
 struct KernelRegistry {
@@ -23,10 +24,9 @@ struct KernelRegistry {
 // 3. Populate and return the registry
 inline std::vector<KernelRegistry> all_match_kernels() {
     return {
-    {% for method in methods %}
         // Assumes every file defines a function literally named `matmul`
-        {"{{ method }}", {{ method }}::matmul}{% if not loop.last %},{% endif %}
-    {% endfor %}
+        {"baseline", baseline::matmul},
+        {"{{ method_name }}", {{ method_name }}::matmul}
     };
 }
 
