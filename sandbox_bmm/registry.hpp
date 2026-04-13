@@ -10,8 +10,8 @@
 namespace  baseline  {
     #include "baseline.hpp"
 }
-namespace optimized22 {
-    #include "gpt-oss_120b/optimized22.hpp"
+namespace optimized_simple {
+    #include "gpt-oss_20b/optimized_simple.hpp"
 }
 
 // 2. Define the struct our main.cpp loop expects
@@ -26,6 +26,6 @@ inline std::vector<KernelRegistry> all_match_kernels() {
     return {
         // Assumes every file defines a function literally named `matmul`
         {"baseline", baseline::matmul},
-        {"optimized22", optimized22::matmul}
+        {"optimized_simple", optimized_simple::matmul}
     };
 }

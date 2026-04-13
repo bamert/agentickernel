@@ -56,9 +56,9 @@ class KernelTools:
             self.fastest_method = target_name
             
         if len(self.log) == 0:
-            self.log.append(f"{self.current_loop_iter}, baseline,{message},{baseline_ms}, 1.00, {self.tokens_in}, {self.tokens_out}, 0, {wall_time:.1f}")
+            self.log.append(f"{self.current_loop_iter}, baseline,{baseline_ms}, 1.00, {self.tokens_in}, {self.tokens_out}, 0, {wall_time:.1f}")
         
-        self.log.append(f"{self.current_loop_iter}, {target_name},{message},{target_ms}, {(baseline_ms/target_ms):.2f}, {self.tokens_in}, {self.tokens_out}, {self.cumulative_cost}, {wall_time:.1f}")
+        self.log.append(f"{self.current_loop_iter}, {target_name},{target_ms}, {(baseline_ms/target_ms):.2f}, {self.tokens_in}, {self.tokens_out}, {self.cumulative_cost}, {wall_time:.1f}")
         self.perf["baseline"] = f"{baseline_ms}ms"
         self.perf[target_name] = f"{target_ms}ms"
     def get_perf_log_for_llm(self) -> str:
@@ -72,8 +72,8 @@ class KernelTools:
         output_path = self.script_dir / f"benchmark_{self.implementation_name}_results_{timestamp}.csv"
         
         # Build the entire CSV content as a single string
-        content = "model,iteration,target,message,target_ms,speedup,tokens_in,tokens_out,cumulative_cost_usd, wall_time_sec\n"
-        content += "".join(f'"{self.implementation_name},{compaction_mode}",{entry}\n' for entry in self.log)
+        content = "model,compaction,iteration,target,message,target_ms,speedup,tokens_in,tokens_out,cumulative_cost_usd, wall_time_sec\n"
+        content += "".join(f'{self.implementation_name},{compaction_mode},{entry}\n' for entry in self.log)
         
         # Write it to disk in one shot
         output_path.write_text(content, encoding='utf-8')
@@ -196,7 +196,7 @@ def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_it
         "Every file you evaluate is tested 1v1 against the baseline. If an approach fails to compile or is too slow, "
         "you can either try to fix it in the same file, or abandon it and start a completely new file."
     )
-    spec_prompt = "Optimize baseline.hpp by writing more efficient versions. Fore each attempt, create a new .hpp with the same structure as baseline.hpp and same function signature for matmul. Use the same function signature for matmul. Start without intrinsics. If you later want to use intrinsics, use NEON, but stay on one core (no openmp or similar). neon intrinsics are already included in the harness. you don't need to add it."
+    spec_prompt = "Optimize baseline.hpp by writing more efficient versions. Fore each attempt, create a new .hpp with the same structure as baseline.hpp and same function signature for matmul. Use the same function signature for matmul. Start without intrinsics. If you later want to use intrinsics, use NEON, but stay on one core (no openmp or similar). neon intrinsics are already included in the harness. you don't need to add it. Do not write code in the chat, always use the write_and_evaluate_kernel tool."
     
     base_file = toolkit.sandbox_dir / "baseline.hpp"
     if base_file.exists(): 
