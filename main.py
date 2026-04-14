@@ -35,8 +35,8 @@ class KernelTools:
         self.build_dir = build_dir
         self.implementation_dir.mkdir(parents=True, exist_ok=True)
         self.jinja_env = Environment(loader=FileSystemLoader(str(self.sandbox_dir)))
-        self.perf: dict[str,str] = {} # method to outcome mapping (if multiple attempts were made, only latest one)
-        self.log = [] # chronological log and perf  (for all attempts)
+        self.perf: dict[str,str] = {} 
+        self.log = [] 
         self.fastest_time_ms = float('inf')
         self.fastest_method = "baseline"
         self.current_loop_iter = 0
@@ -71,11 +71,9 @@ class KernelTools:
         timestamp = datetime.now().strftime("%y%m%d%H%M")
         output_path = self.script_dir / f"benchmark_{self.implementation_name}_results_{timestamp}.csv"
         
-        # Build the entire CSV content as a single string
         content = "model,compaction,iteration,target,target_ms,speedup,tokens_in,tokens_out,cumulative_cost_usd,wall_time_sec\n"
         content += "".join(f'{self.implementation_name},{compaction_mode},{entry}\n' for entry in self.log)
         
-        # Write it to disk in one shot
         output_path.write_text(content, encoding='utf-8')
         print(f"\n[*] Run results saved to {output_path}")
     def get_tool_schemas(self) -> list[dict]:
@@ -129,9 +127,7 @@ class KernelTools:
         print(f"  -> Benchmark {"complete" if bench_ok else "failed"}")
         if not bench_ok:
             self.log_perf(target_name, "tests failed")
-        # --- EXTRACT RUNTIMES FROM CSV ---
         if compile_ok and bench_ok:
-            # Look for the quoted names in the CSV output
             base_match = re.search(r'^"baseline",\d+,([^,]+),', bench_out, re.MULTILINE)
             target_match = re.search(rf'^"{target_name}",\d+,([^,]+),', bench_out, re.MULTILINE)
 
