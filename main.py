@@ -72,7 +72,7 @@ class KernelTools:
         output_path = self.script_dir / f"benchmark_{self.implementation_name}_results_{timestamp}.csv"
         
         # Build the entire CSV content as a single string
-        content = "model,compaction,iteration,target,message,target_ms,speedup,tokens_in,tokens_out,cumulative_cost_usd, wall_time_sec\n"
+        content = "model,compaction,iteration,target,target_ms,speedup,tokens_in,tokens_out,cumulative_cost_usd,wall_time_sec\n"
         content += "".join(f'{self.implementation_name},{compaction_mode},{entry}\n' for entry in self.log)
         
         # Write it to disk in one shot
@@ -170,8 +170,6 @@ class KernelTools:
     def list_files(self) -> dict:
         return {"success": True, "files": sorted([f.name for f in self.implementation_dir.iterdir() if f.is_file()])}
 
-# --- PURE STATELESS REPL ---
-
 def call_llm(conv, tools, model, url, key):
     headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {key}"} if key else {})}
     payload = {"model": model, "messages": conv, "tools": tools}
@@ -250,13 +248,11 @@ def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_it
                 if t_name == "write_and_evaluate_kernel" and res.get("success"):
                     print("Flushing context to save tokens...")
                     
-                    # 1. Reset conversation to the original system and user prompts
                     conversation = [
                         {"role": "system", "content": sys_prompt}, 
                         {"role": "user", "content": spec_prompt}
                     ]
                     
-                    # 2. Build the "catch-up" message using your new logging system
                     perf_state = toolkit.get_perf_log_for_llm()
                     target = t_args.get('name', 'your last attempt')
                     
@@ -268,7 +264,6 @@ def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_it
                         f"Please continue optimizing."
                     )
                     
-                    # 3. Append the catch-up message and skip the raw tool append
                     conversation.append({"role": "user", "content": catch_up_msg})
                     continue
 
@@ -300,7 +295,7 @@ if __name__ == "__main__":
         sys.exit(130) 
     except Exception as e:
         print(f"\n[!] Error encountered: {e}")
-        traceback.print_exc()  # This prints the actual error line so you aren't flying blind!
-        sys.exit(1) #To abort outer loop as well 
+        traceback.print_exc()  
+        sys.exit(1) 
     finally:
         kernel_tools.export_csv(args.compaction)

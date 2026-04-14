@@ -1,0 +1,51 @@
+void matmul(const float* A, const uint32_t* B, float* C, size_t M, size_t K) {
+    size_t K_ints = K / 32;
+    
+    // Re-implementing the most successful pattern: Blocking the output column index j into chunks of 4.
+    const size_t J_BLOCK_SIZE = 4;
+    
+    for (size_t i = 0; i < M; ++i) {         // For each row in A (M)
+        
+        // Loop over blocks of 4 columns (0, 4, 8, ...)
+        for (size_t j_block_start = 0; j_block_start < K; j_block_start += J_BLOCK_SIZE) {
+            
+            // Accumulators for the 4 target columns (j_block_start to j_block_start + 3)
+            float sums[J_BLOCK_SIZE] = {0.0f}; 
+            
+            // Inner sum loop: over p (K dimension) - sequential summation
+            for (size_t p = 0; p < K; ++p) {
+                float a_val = A[i * K + p];
+                
+                // Calculate contribution for all 4 potential target columns in this block
+                for (size_t t = 0; t < J_BLOCK_SIZE; ++t) {
+                    size_t j = j_block_start + t;
+                    
+                    // Boundary check: Stop if the target column index j is outside the matrix bounds K
+                    if (j >= K) break; 
+
+                    // 1. Read bit sign S_pj
+                    size_t j_word = j / 32;
+                    size_t j_bit = j % 32;
+                    
+                    // B index: Row p, Word j_word
+                    uint32_t packed = B[p * K_ints + j_word];
+                    uint32_t bit = (packed >> j_bit) & 1;
+                    
+                    float sign = bit ? 1.0f : -1.0f;
+                    
+                    // Accumulate A[i, p] * sign into the t-th slot
+                    sums[t] += a_val * sign;
+                }
+            }
+            
+            // Write out the results for the 4 columns
+            for (size_t t = 0; t < J_BLOCK_SIZE; ++t) {
+                size_t j = j_block_start + t;
+                if (j < K) {
+                    C[i * K + j] = sums[t];
+                }
+            }
+        }
+        // No remaining cleanup loop needed, as the block structure covers all indices up to K-1.
+    }
+}

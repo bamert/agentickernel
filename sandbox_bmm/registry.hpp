@@ -10,8 +10,8 @@
 namespace  baseline  {
     #include "baseline.hpp"
 }
-namespace optimized_simple {
-    #include "gpt-oss_20b/optimized_simple.hpp"
+namespace matmul_neon_col_buffer {
+    #include "gemma4_31b/matmul_neon_col_buffer.hpp"
 }
 
 // 2. Define the struct our main.cpp loop expects
@@ -26,6 +26,6 @@ inline std::vector<KernelRegistry> all_match_kernels() {
     return {
         // Assumes every file defines a function literally named `matmul`
         {"baseline", baseline::matmul},
-        {"optimized_simple", optimized_simple::matmul}
+        {"matmul_neon_col_buffer", matmul_neon_col_buffer::matmul}
     };
 }

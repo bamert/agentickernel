@@ -1,0 +1,93 @@
+#pragma once
+
+using uint32_t = unsigned int;
+using uint64_t = unsigned long long;
+using size_t   = unsigned long;
+
+// Two‑row batched matmul using 64‑bit packed B.
+// Computes C = 2*sum_one - row_sum where row_sum is accumulated on‑the‑fly.
+// Uses __restrict qualifiers and prefetching of B rows for better cache usage.
+void matmul(const float* __restrict A, const uint32_t* __restrict B, float* __restrict C,
+            size_t M, size_t K) {
+    const size_t ints_per_row = K / 32; // uint32 elements per B row
+    const size_t K_ints64 = K / 64;     // uint64 elements per B row (covers 64 columns)
+    const size_t prefetch_dist = 16;    // distance for prefetching B rows
+
+    // Reusable per‑row accumulators for a batch of two rows.
+    float* sum_one0 = new float[K];
+    float* sum_one1 = new float[K];
+
+    size_t i = 0;
+    for (; i + 1 < M; i += 2) {
+        const float* a_row0 = A + i * K;
+        const float* a_row1 = A + (i + 1) * K;
+
+        // Initialise row sums and clear accumulators.
+        float row_sum0 = 0.0f, row_sum1 = 0.0f;
+        memset(sum_one0, 0, K * sizeof(float));
+        memset(sum_one1, 0, K * sizeof(float));
+
+        // Main accumulation loop – also computes row sums.
+        for (size_t p = 0; p < K; ++p) {
+            // Prefetch upcoming B rows.
+            if (p + prefetch_dist < K) {
+                __builtin_prefetch(B + (p + prefetch_dist) * ints_per_row, 0, 1);
+            }
+            float a_val0 = a_row0[p];
+            float a_val1 = a_row1[p];
+            row_sum0 += a_val0;
+            row_sum1 += a_val1;
+            const uint64_t* b_row64 = reinterpret_cast<const uint64_t*>(B + p * ints_per_row);
+            for (size_t blk = 0; blk < K_ints64; ++blk) {
+                uint64_t packed = b_row64[blk];
+                float* base0 = sum_one0 + blk * 64;
+                float* base1 = sum_one1 + blk * 64;
+                while (packed) {
+                    uint32_t t = __builtin_ctzll(packed);
+                    base0[t] += a_val0;
+                    base1[t] += a_val1;
+                    packed &= packed - 1ULL; // clear lowest set bit
+                }
+            }
+        }
+
+        // Store results.
+        float* c_row0 = C + i * K;
+        float* c_row1 = C + (i + 1) * K;
+        for (size_t j = 0; j < K; ++j) {
+            c_row0[j] = 2.0f * sum_one0[j] - row_sum0;
+            c_row1[j] = 2.0f * sum_one1[j] - row_sum1;
+        }
+    }
+
+    // Handle possible trailing row.
+    if (i < M) {
+        const float* a_row = A + i * K;
+        float row_sum = 0.0f;
+        memset(sum_one0, 0, K * sizeof(float));
+        for (size_t p = 0; p < K; ++p) {
+            if (p + prefetch_dist < K) {
+                __builtin_prefetch(B + (p + prefetch_dist) * ints_per_row, 0, 1);
+            }
+            float a_val = a_row[p];
+            row_sum += a_val;
+            const uint64_t* b_row64 = reinterpret_cast<const uint64_t*>(B + p * ints_per_row);
+            for (size_t blk = 0; blk < K_ints64; ++blk) {
+                uint64_t packed = b_row64[blk];
+                float* base = sum_one0 + blk * 64;
+                while (packed) {
+                    uint32_t t = __builtin_ctzll(packed);
+                    base[t] += a_val;
+                    packed &= packed - 1ULL;
+                }
+            }
+        }
+        float* c_row = C + i * K;
+        for (size_t j = 0; j < K; ++j) {
+            c_row[j] = 2.0f * sum_one0[j] - row_sum;
+        }
+    }
+
+    delete[] sum_one0;
+    delete[] sum_one1;
+}
