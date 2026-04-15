@@ -21,20 +21,16 @@ inline void generate_data(size_t M, size_t K,
     std::mt19937 gen(42); 
     std::uniform_real_distribution<float> f32_dist(-5.0f, 5.0f);
     
-    // A random uint32_t is exactly 32 random bits!
     std::uniform_int_distribution<uint32_t> u32_dist(0, 0xFFFFFFFF);
 
-    // 1. Populate Matrix A
     for (auto& val : A) {
         val = f32_dist(gen);
     }
 
-    // 2. Populate Matrix B
     for (auto& val : B) {
         val = u32_dist(gen);
     }
 
-    // 3. Calculate C_expected using the textbook triple-loop
     for (size_t i = 0; i < M; ++i) {
         for (size_t j = 0; j < K; ++j) {
             float sum = 0.0f;
@@ -67,20 +63,14 @@ int main(int argc, char** argv) {
     std::cout << "Generating test matrices (A: " << M << "x" << K << ", B: " << K << "x" << K << ")...\n";
     generate_data(M, K, A, B, C_expected);
     
-    // Buffer for the kernels to write into
     std::vector<float> C_target(M * K, 0.0f);
     std::vector<std::string> failed;
 
-    // 1. Run Tests Once
     for (const auto& k : all_match_kernels()) {
-        // Clear the target buffer so kernels can't cheat by doing nothing
         std::fill(C_target.begin(), C_target.end(), 0.0f);
-        
-        // Execute Kernel
         k.fn(A.data(), B.data(), C_target.data(), M, K);
         
-        // Validate
-        const float EPSILON = 1.0f; // Accumulating 3072 floats introduces drift
+        const float EPSILON = 1.0f; 
         bool pass = true;
         float max_err = 0.0f;
         
@@ -104,7 +94,6 @@ int main(int argc, char** argv) {
         std::cerr << "Test failed. Skipping benchmarks " << std::endl;
         exit(1);
     }
-    // 2. Register Benchmarks Once
     for (const auto& k : all_match_kernels()) {
         benchmark::RegisterBenchmark(k.name.c_str(), [k, &A, &B, &C_target, M, K](benchmark::State& state) {
             for (auto _ : state) {
@@ -115,7 +104,6 @@ int main(int argc, char** argv) {
         });
     }
 
-    // 3. Initialize and Run ONCE at the very end
     benchmark::Initialize(&argc, argv);
     benchmark::RunSpecifiedBenchmarks();
     
