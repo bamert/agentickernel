@@ -2,7 +2,7 @@
 Automatically iterates compute kernels on a baseline reference implementation to optimize towards performance improvements.
 Under a spending cap, local models (Such as `gemma4:31b`) found speedups of over 40x, exceeding frontier models on performance/cost.
 
-> 📖 For a full write-up, see the [**blog post]**(https://nikbamert.com/article/agentic-kernel-optimization)
+> 📖 For a full write-up, see the [**blog post**](https://nikbamert.com/article/agentic-kernel-optimization)
 
 # Why
 The performance of compute kernels is critical for a wide range of applications. Optimizing these kernels often requires time-consuming hand-tuning. In this project we consider the trade-offs between cost (for API access to the models) of various frontier and local models and demonstrate that local models can be very competitive under budget constraints.
