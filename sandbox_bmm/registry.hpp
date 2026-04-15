@@ -6,22 +6,26 @@
 #include <arm_neon.h>
 #endif
 
+// 1. Wrap every agent file in its own namespace to prevent ODR errors
 namespace  baseline  {
     #include "baseline.hpp"
 }
-namespace matmul_neon_col_buffer {
-    #include "gemma4_31b/matmul_neon_col_buffer.hpp"
+namespace optimization_1 {
+    #include "qwen3.5_9b/optimization_1.hpp"
 }
 
+// 2. Define the struct our main.cpp loop expects
 struct KernelRegistry {
     std::string name;
+    // UPDATED SIGNATURE: Matrix A, Matrix B, Matrix C, M (rows), K (inner dim)
     void (*fn)(const float*, const uint32_t*, float*, size_t, size_t);
 };
 
+// 3. Populate and return the registry
 inline std::vector<KernelRegistry> all_match_kernels() {
     return {
         // Assumes every file defines a function literally named `matmul`
         {"baseline", baseline::matmul},
-        {"matmul_neon_col_buffer", matmul_neon_col_buffer::matmul}
+        {"optimization_1", optimization_1::matmul}
     };
 }

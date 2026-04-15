@@ -1,8 +1,7 @@
-import argparse
-import sys
 import traceback
+import argparse
 import os
-from typing import Literal
+from typing import Literal, get_args
 import time
 from datetime import datetime
 import re
@@ -13,7 +12,14 @@ import requests
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
-
+BANNED_KEYWORDS = [r'\bstatic\b', r'\bthread_local\b', r'\bextern\b', r'\basm\b', r'\b__asm__\b']
+SYSTEM_PROMPT = (
+    "You are a C++ Optimization Agent. Do NOT use #includes in your generated files. Do NOT use the `static` keyword in your code or anything else to persist data across invocations."
+    "Every file you evaluate is tested 1v1 against the baseline. If an approach fails to compile or is too slow, "
+    "you can either try to fix it in the same file, or abandon it and start a completely new file."
+)
+SPEC_PROMPT = "Optimize baseline.hpp by writing more efficient versions. Fore each attempt, create a new .hpp with the same structure as baseline.hpp and same function signature for matmul. Use the same function signature for matmul. Start without intrinsics. If you later want to use intrinsics, use NEON, but stay on one core (no openmp or similar). neon intrinsics are already included in the harness. you don't need to add it. Do not write code in the chat, always use the write_and_evaluate_kernel tool."
+CompactionMode = Literal["none", "flush"]
 def run_cmd(cmd: list[str], cwd: Path) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
@@ -99,14 +105,10 @@ class KernelTools:
         if not name.endswith(".hpp"): name += ".hpp"
         target_path = self.implementation_dir / name
         target_name = Path(name).stem
-        banned_keywords = [r'\bstatic\b', r'\bthread_local\b', r'\bextern\b', r'\basm\b', r'\b__asm__\b']
-        for keyword in banned_keywords:
+        for keyword in BANNED_KEYWORDS:
             if re.search(keyword, content):
-                return {
-                    "success": False, 
-                    "output": f"COMPILATION FAILED:\n\nRULE VIOLATION: The keyword '{keyword.replace(r'\\b', '')}' is strictly banned. The function must be 100% stateless and use pure C++ intrinsics without inline assembly."
-                }
-       
+                return make_ban_response(keyword)
+      
         print(f"\n[PROPOSING] {name}")
         target_path.write_text(content, encoding="utf-8")
         self._sync_registry(name)
@@ -179,24 +181,47 @@ def call_llm(conv, tools, model, url, key):
         else:
             return resp["choices"][0]["message"], resp.get("usage", {})
     raise RuntimeError("LLM did not return a valid response after 3 attempts.")
+def make_ban_response(keyword:str) -> dict:
+    return {
+        "success": False, 
+        "output": f"COMPILATION FAILED:\n\nRULE VIOLATION: The keyword '{keyword.replace(r'\\b', '')}' is strictly banned. The function must be 100% stateless and use pure C++ intrinsics without inline assembly."
+                }
+def make_base_conversation(baseline_code: str | None) -> list[dict]:
+    system = SYSTEM_PROMPT
+    if baseline_code:
+        system += f"\n\nBaseline Reference:\n{baseline_code}\n"
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": SPEC_PROMPT},
+    ]
 
-def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_iterations:int, cost_in_per_million:float, cost_out_per_million:float, budget_limit:float, context_compaction: Literal["none", "flush"]):
+def make_continue_message() -> dict:
+       return {
+            "role": "user",
+            "content": (
+                "Please continue working by calling a tool. "
+                "Pick the optimization path most likely to succeed based on feedback so far."
+            ),
+        }
+def make_flush_catchup(target_name: str, perf_summary: str) -> dict:
+    return {
+        "role": "user",
+        "content": (
+            "System Note: The context window was flushed to save memory.\n\n"
+            f"Your last kernel (`{target_name}`) compiled and benched successfully. "
+            f"Leaderboard of all attempts so far:\n{perf_summary}\n\n"
+            "If you need to see the code for any previous attempt, use the `read_file` tool. "
+            "Please continue optimizing."
+        ),
+    }
+def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_iterations:int, cost_in_per_million:float, cost_out_per_million:float, budget_limit:float, context_compaction: CompactionMode):
     total_in_tokens = 0
     total_out_tokens = 0
     cumulative_cost = 0.0
 
-    sys_prompt = (
-        "You are a C++ Optimization Agent. Do NOT use #includes in your generated files. Do NOT use the `static` keyword in your code or anything else to persist data across invocations."
-        "Every file you evaluate is tested 1v1 against the baseline. If an approach fails to compile or is too slow, "
-        "you can either try to fix it in the same file, or abandon it and start a completely new file."
-    )
-    spec_prompt = "Optimize baseline.hpp by writing more efficient versions. Fore each attempt, create a new .hpp with the same structure as baseline.hpp and same function signature for matmul. Use the same function signature for matmul. Start without intrinsics. If you later want to use intrinsics, use NEON, but stay on one core (no openmp or similar). neon intrinsics are already included in the harness. you don't need to add it. Do not write code in the chat, always use the write_and_evaluate_kernel tool."
-    
-    base_file = toolkit.sandbox_dir / "baseline.hpp"
-    if base_file.exists(): 
-        sys_prompt += f"\n\nBaseline Reference:\n{base_file.read_text()}\n"
-    
-    conversation = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": spec_prompt}]
+   
+    baseline_code = (toolkit.sandbox_dir / "baseline.hpp").read_text()
+    conversation = make_base_conversation(baseline_code)
 
     for iteration in range(max_iterations):
         print(f"\n--- Iteration {iteration}/{max_iterations} ---")
@@ -221,7 +246,7 @@ def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_it
             print(f"Agent:\n{msg['content']}\n")
             
         if not msg.get("tool_calls"):
-            conversation.append({"role": "user", "content": "Please continue working by calling a tool. Pick the optimization path that you think is most likely to succeed based on the feedback you have received so far."})
+            conversation.append(make_continue_message())
             continue
             
         for call in msg["tool_calls"]:
@@ -243,28 +268,14 @@ def run_autonomous_loop(toolkit:KernelTools, model:str, url:str, key:str, max_it
             elif context_compaction == "flush":
                 if t_name == "write_and_evaluate_kernel" and res.get("success"):
                     print("Flushing context to save tokens...")
-                    
-                    conversation = [
-                        {"role": "system", "content": sys_prompt}, 
-                        {"role": "user", "content": spec_prompt}
-                    ]
-                    
+                    conversation = make_base_conversation(baseline_code)
                     perf_state = toolkit.get_perf_log_for_llm()
                     target = t_args.get('name', 'your last attempt')
-                    
-                    catch_up_msg = (
-                        f"System Note: The context window was flushed to save memory.\n\n"
-                        f"Your last kernel (`{target}`) compiled and benched successfully. "
-                        f"Here is the leaderboard of all attempts so far:\n{perf_state}\n\n"
-                        f"If you need to see the code for any previous attempt, use the `read_file` tool. "
-                        f"Please continue optimizing."
-                    )
-                    
-                    conversation.append({"role": "user", "content": catch_up_msg})
+                    conversation.append(make_flush_catchup(target, perf_state))
                     continue
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the Autonomous Optimization Agent")
+    parser = argparse.ArgumentParser(description="Agentic Kernel Optimization")
     parser.add_argument("--url", type=str, required=True, help="OpenAI compatible /completions API endpoint URL (e.g., http://localhost/v1/chat/completions)")
     parser.add_argument("--model", type=str, required=True, help="Model identifier (e.g., 'gpt-oss:20b')")
     parser.add_argument("--cost_out_per_million", type=float, required=False, default=0, help="Cost per million output tokens in $")
@@ -273,12 +284,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--compaction", 
         type=str, 
-        choices=["none", "flush"], 
+        choices=get_args(CompactionMode),
         default="none", 
         help="Context compaction mode: 'none' (default) or 'flush'."
     )
     args = parser.parse_args()
-    key = os.getenv("OPENROUTER")
+    key = os.getenv("OPENROUTER_API_KEY")
     script_dir = Path(__file__).resolve().parent
     sandbox_dir = script_dir / "sandbox_bmm"
     build_dir = script_dir / "build"
