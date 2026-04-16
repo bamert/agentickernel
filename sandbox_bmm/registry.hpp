@@ -10,8 +10,8 @@
 namespace  baseline  {
     #include "baseline.hpp"
 }
-namespace optimization_1 {
-    #include "qwen3.5_9b/optimization_1.hpp"
+namespace opt16 {
+    #include "anthropic_claude-opus-4.6/opt16.hpp"
 }
 
 // 2. Define the struct our main.cpp loop expects
@@ -26,6 +26,6 @@ inline std::vector<KernelRegistry> all_match_kernels() {
     return {
         // Assumes every file defines a function literally named `matmul`
         {"baseline", baseline::matmul},
-        {"optimization_1", optimization_1::matmul}
+        {"opt16", opt16::matmul}
     };
 }

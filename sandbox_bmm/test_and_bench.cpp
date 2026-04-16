@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
         std::fill(C_target.begin(), C_target.end(), 0.0f);
         k.fn(A.data(), B.data(), C_target.data(), M, K);
         
-        const float EPSILON = 1.0f; 
+        const double EPSILON = 0.01f;
         bool pass = true;
         float max_err = 0.0f;
         
@@ -97,6 +97,9 @@ int main(int argc, char** argv) {
     for (const auto& k : all_match_kernels()) {
         benchmark::RegisterBenchmark(k.name.c_str(), [k, &A, &B, &C_target, M, K](benchmark::State& state) {
             for (auto _ : state) {
+                state.PauseTiming();
+                std::fill(C_target.begin(), C_target.end(), 0.0f);
+                state.ResumeTiming();
                 k.fn(A.data(), B.data(), C_target.data(), M, K);
                 benchmark::DoNotOptimize(C_target.data());
                 benchmark::ClobberMemory(); 
