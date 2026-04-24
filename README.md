@@ -7,7 +7,7 @@ Under a spending cap, local models (Such as `gemma4:31b`) found speedups of over
 # Why
 The performance of compute kernels is critical for a wide range of applications. Optimizing these kernels often requires time-consuming hand-tuning. In this project we consider the trade-offs between cost (for API access to the models) of various frontier and local models and demonstrate that local models can be very competitive under budget constraints.
 
-* Note*The code is deliberately kept simple and in a single file and is not intended for production use.
+*Note* This repository is an experimental benchmark harness, not a production framework. The implementation is intentionally kept small and contained to make the optimization loop easy to inspect and reproduce.
 
 # Requirements and how to use
 - A C compiler, `cmake` and google benchmark.
