@@ -11,7 +11,7 @@ The performance of compute kernels is critical for a wide range of applications.
 
 # Requirements and how to use
 - A C compiler, `cmake` and google benchmark.
-- An OpenAI compatible API for the agent loop to call. If an API key is required for the host, it can be passed throuhgh `OPENROUTER_API_KEY`.
+- An OpenAI compatible API for the agent loop to call. If an API key is required for the host, it can be passed through `OPENROUTER_API_KEY`.
 
 # Setup
 
